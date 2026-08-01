@@ -1,1 +1,2 @@
-<img width="1376" height="768" alt="20260801-hisyo-eu-ai-act-transparency" src="https://github.com/user-attachments/assets/50e3f17b-f46e-4a89-b0d4-de4b20910528" />
+<img width="946" height="673" alt="20260801-smile-watch-app-sample" src="https://github.com/user-attachments/assets/ba1c0c4c-dcb2-42a8-a7fc-e678e89973db" />
+
