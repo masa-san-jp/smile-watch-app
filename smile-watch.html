@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>笑顔ウォッチ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500&family=M+PLUS+1+Code:wght@200;400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#EEECF3;
+    --surface:#F9F8FC;
+    --line:#D6D2E0;
+    --ink:#23212B;
+    --ink-soft:#6B6579;
+    --cool:#6E63A6;
+    --warm:#F0A93B;
+    --idle:#C8C4D2;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"Zen Kaku Gothic New",system-ui,sans-serif;
+    line-height:1.7;
+    min-height:100vh;
+    display:flex;
+    justify-content:center;
+    padding:28px 20px 40px;
+  }
+  .app{width:100%;max-width:880px;}
+
+  header{
+    display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+    padding-bottom:18px;border-bottom:1px solid var(--line);
+  }
+  h1{
+    font-family:"Zen Maru Gothic",sans-serif;font-weight:700;
+    font-size:20px;margin:0;letter-spacing:.04em;
+  }
+  .status{
+    display:flex;align-items:center;gap:8px;
+    font-size:13px;color:var(--ink-soft);margin-left:auto;
+  }
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--idle);}
+  .dot.live{background:var(--warm);box-shadow:0 0 0 4px rgba(240,169,59,.2);}
+  .dot.wait{background:var(--cool);}
+  .dot.error{background:#C4574E;}
+  button{
+    font-family:inherit;font-size:14px;font-weight:500;
+    padding:9px 20px;border-radius:999px;cursor:pointer;
+    border:1px solid var(--ink);background:var(--ink);color:var(--surface);
+    transition:opacity .15s;
+  }
+  button:hover{opacity:.85;}
+  button:disabled{opacity:.4;cursor:default;}
+  button.off{background:transparent;color:var(--ink);}
+  button:focus-visible{outline:2px solid var(--cool);outline-offset:3px;}
+
+  .now{padding:34px 0 8px;}
+  .score{
+    font-family:"M PLUS 1 Code",monospace;font-weight:200;
+    font-size:clamp(64px,13vw,104px);line-height:1;
+    letter-spacing:-.02em;font-variant-numeric:tabular-nums;
+  }
+  .score .unit{font-size:.3em;margin-left:.15em;color:var(--ink-soft);}
+  .score-label{margin:6px 0 22px;font-size:13px;color:var(--ink-soft);}
+
+  .ribbon-wrap{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:12px;}
+  canvas{display:block;width:100%;height:88px;border-radius:6px;}
+  .axis{
+    display:flex;justify-content:space-between;
+    font-family:"M PLUS 1 Code",monospace;font-size:11px;
+    color:var(--ink-soft);padding-top:8px;
+  }
+
+  .cheer{
+    margin-top:18px;padding:22px 24px;border-radius:var(--radius);
+    background:linear-gradient(100deg,#FBF3E4,#F3EFFA);
+    border:1px solid #E6DCC9;
+  }
+  .cheer p{
+    margin:0;font-family:"Zen Maru Gothic",sans-serif;font-weight:500;
+    font-size:clamp(17px,2.4vw,21px);line-height:1.75;
+  }
+  .cheer[hidden]{display:none;}
+  .cheer.enter{animation:rise .5s ease-out;}
+  @keyframes rise{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
+  @media (prefers-reduced-motion:reduce){.cheer.enter{animation:none;}}
+
+  .panel{
+    margin-top:26px;display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start;
+    border-top:1px solid var(--line);padding-top:22px;
+  }
+  video{
+    width:160px;aspect-ratio:4/3;object-fit:cover;border-radius:10px;
+    background:#DAD6E2;transform:scaleX(-1);
+  }
+  .controls{flex:1;min-width:240px;display:grid;gap:16px;}
+  .field{display:grid;gap:6px;}
+  .field label{font-size:12px;color:var(--ink-soft);display:flex;justify-content:space-between;}
+  .field b{font-family:"M PLUS 1 Code",monospace;font-weight:400;color:var(--ink);}
+  input[type=range]{width:100%;accent-color:var(--cool);}
+  select{
+    font-family:inherit;font-size:14px;padding:7px 10px;
+    border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);
+  }
+  .note{margin-top:22px;font-size:12px;color:var(--ink-soft);}
+  .note.alert{color:#A8433B;}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>笑顔ウォッチ</h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">停止中</span></div>
+    <button id="toggleBtn">見守りを始める</button>
+  </header>
+
+  <section class="now">
+    <div class="score"><span id="scoreValue">--</span><span class="unit">%</span></div>
+    <p class="score-label">直近1分の笑顔スコア</p>
+    <div class="ribbon-wrap">
+      <canvas id="ribbon"></canvas>
+      <div class="axis"><span>5分前</span><span>いま</span></div>
+    </div>
+  </section>
+
+  <section class="cheer" id="cheer" aria-live="polite" hidden><p id="cheerText"></p></section>
+
+  <section class="panel">
+    <video id="video" playsinline muted></video>
+    <div class="controls">
+      <div class="field">
+        <label for="threshold">励ますしきい値 <b id="thresholdOut">20</b></label>
+        <input type="range" id="threshold" min="5" max="60" step="1" value="20">
+      </div>
+      <div class="field">
+        <label for="duration">判定時間</label>
+        <select id="duration">
+          <option value="30">30秒つづいたら</option>
+          <option value="60">60秒つづいたら</option>
+          <option value="90" selected>90秒つづいたら</option>
+          <option value="120">120秒つづいたら</option>
+        </select>
+      </div>
+    </div>
+  </section>
+
+  <p class="note" id="note">映像はこのパソコンの中だけで処理します。録画も送信もしません。</p>
+</div>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+/* ---------- 定数 ---------- */
+const SAMPLE_MS   = 200;      // サンプリング間隔
+const WINDOW_MS   = 60_000;   // 表示スコアの移動平均窓
+const WARMUP_MS   = 30_000;   // 判定開始までのウォームアップ
+const ABSENT_MS   = 10_000;   // 不在とみなすまでの時間
+const COOLDOWN_MS = 300_000;  // 励ましのクールダウン
+const COL_W       = 3;        // リボン1本の幅(px) = 1秒
+const MESSAGES = [
+  "ひと息いれよう。肩を下ろして、深呼吸をひとつ。",
+  "いい調子。ここまで進んだのは、あなたの手です。",
+  "窓の外を10秒だけ見てみる。目も気持ちもゆるみます。",
+  "完璧じゃなくていい。今日の分は今日の分。",
+  "水を一杯どうぞ。体が軽くなると、顔もゆるみます。",
+  "難しい顔になっていました。いちど立ち上がってみませんか。",
+  "うまくいかない時間も、ちゃんと進んでいる時間です。",
+  "口角を1ミリ上げるだけで、脳は少しだまされます。ためしに。"
+];
+
+/* ---------- 要素 ---------- */
+const video = document.getElementById("video");
+const canvas = document.getElementById("ribbon");
+const ctx = canvas.getContext("2d");
+const dot = document.getElementById("dot");
+const statusText = document.getElementById("statusText");
+const toggleBtn = document.getElementById("toggleBtn");
+const scoreValue = document.getElementById("scoreValue");
+const cheer = document.getElementById("cheer");
+const cheerText = document.getElementById("cheerText");
+const note = document.getElementById("note");
+const thresholdInput = document.getElementById("threshold");
+const thresholdOut = document.getElementById("thresholdOut");
+const durationInput = document.getElementById("duration");
+
+/* ---------- 状態 ---------- */
+let landmarker = null;
+let stream = null;
+let running = false;
+let samples = [];        // {t, score|null} 直近60秒
+let columns = [];        // 1秒ごとの平均 (number|null)
+let secondBuf = [];
+let lastSample = 0, lastColumn = 0, lastFaceAt = 0, startedAt = 0;
+let lowSince = null, lastCheerAt = 0, lastMessage = -1;
+let cheerTimer = null;
+
+thresholdInput.addEventListener("input", () => thresholdOut.textContent = thresholdInput.value);
+toggleBtn.addEventListener("click", () => running ? stop() : start());
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+drawRibbon();
+
+/* ---------- 開始 / 停止 ---------- */
+async function start(){
+  toggleBtn.disabled = true;
+  setStatus("wait", "読み込み中");
+  try{
+    if(!landmarker) landmarker = await loadModel();
+    stream = await navigator.mediaDevices.getUserMedia({ video:{ width:640, height:480 } });
+    video.srcObject = stream;
+    await video.play();
+  }catch(err){
+    setStatus("error", "開始できません");
+    note.className = "note alert";
+    note.textContent = describeError(err);
+    toggleBtn.disabled = false;
+    stopStream();
+    return;
+  }
+  note.className = "note";
+  note.textContent = "映像はこのパソコンの中だけで処理します。録画も送信もしません。";
+  running = true;
+  samples = []; columns = []; secondBuf = [];
+  startedAt = performance.now();
+  lastColumn = startedAt; lastFaceAt = startedAt;
+  lowSince = null; lastCheerAt = 0;
+  toggleBtn.disabled = false;
+  toggleBtn.textContent = "見守りを止める";
+  toggleBtn.classList.add("off");
+  setStatus("live", "見守り中");
+  requestAnimationFrame(loop);
+}
+
+function stop(){
+  running = false;
+  stopStream();
+  toggleBtn.textContent = "見守りを始める";
+  toggleBtn.classList.remove("off");
+  setStatus("", "停止中");
+  scoreValue.textContent = "--";
+  hideCheer();
+}
+
+function stopStream(){
+  if(stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
+  video.srcObject = null;
+}
+
+async function loadModel(){
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  const options = {
+    baseOptions:{
+      modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate:"GPU"
+    },
+    outputFaceBlendshapes:true,
+    runningMode:"VIDEO",
+    numFaces:1
+  };
+  try{
+    return await FaceLandmarker.createFromOptions(fileset, options);
+  }catch{
+    options.baseOptions.delegate = "CPU";     // GPU が使えない環境へのフォールバック
+    return await FaceLandmarker.createFromOptions(fileset, options);
+  }
+}
+
+/* ---------- 計測ループ ---------- */
+function loop(){
+  if(!running) return;
+  const now = performance.now();
+  if(now - lastSample >= SAMPLE_MS && video.readyState >= 2){
+    lastSample = now;
+    samples.push({ t:now, score:readSmile(now) });
+    while(samples.length && now - samples[0].t > WINDOW_MS) samples.shift();
+  }
+  if(now - lastColumn >= 1000){
+    lastColumn = now;
+    columns.push(average(secondBuf));
+    secondBuf = [];
+    trimColumns();
+    drawRibbon();
+    judge(now);
+  }
+  requestAnimationFrame(loop);
+}
+
+function readSmile(now){
+  const result = landmarker.detectForVideo(video, now);
+  const shapes = result.faceBlendshapes?.[0]?.categories;
+  if(!shapes){ secondBuf.push(null); return null; }
+  const left  = shapes.find(c => c.categoryName === "mouthSmileLeft")?.score ?? 0;
+  const right = shapes.find(c => c.categoryName === "mouthSmileRight")?.score ?? 0;
+  const score = Math.min(100, (left + right) / 2 * 100);
+  lastFaceAt = now;
+  secondBuf.push(score);
+  return score;
+}
+
+function average(list){
+  const valid = list.filter(v => typeof v === "number");
+  if(!valid.length) return null;
+  return valid.reduce((a,b) => a+b, 0) / valid.length;
+}
+
+/* ---------- 判定 ---------- */
+function judge(now){
+  const current = average(samples.map(s => s.score));
+  scoreValue.textContent = current === null ? "--" : Math.round(current);
+
+  if(now - lastFaceAt > ABSENT_MS){
+    setStatus("wait", "一時停止（顔が見つかりません）");
+    lowSince = null;
+    return;
+  }
+  setStatus("live", "見守り中");
+
+  if(current === null || now - startedAt < WARMUP_MS) return;
+
+  if(current < Number(thresholdInput.value)){
+    if(lowSince === null) lowSince = now;
+    const held = now - lowSince >= Number(durationInput.value) * 1000;
+    const ready = now - lastCheerAt >= COOLDOWN_MS;
+    if(held && ready){ showCheer(); lastCheerAt = now; lowSince = null; }
+  }else{
+    lowSince = null;
+  }
+}
+
+function showCheer(){
+  let index = Math.floor(Math.random() * MESSAGES.length);
+  if(index === lastMessage) index = (index + 1) % MESSAGES.length;
+  lastMessage = index;
+  cheerText.textContent = MESSAGES[index];
+  cheer.hidden = false;
+  cheer.classList.remove("enter");
+  void cheer.offsetWidth;
+  cheer.classList.add("enter");
+  clearTimeout(cheerTimer);
+  cheerTimer = setTimeout(hideCheer, 20_000);
+}
+
+function hideCheer(){
+  clearTimeout(cheerTimer);
+  cheer.hidden = true;
+  cheer.classList.remove("enter");
+}
+
+/* ---------- 描画 ---------- */
+function resizeCanvas(){
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(rect.width * dpr));
+  canvas.height = Math.max(1, Math.round(rect.height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  trimColumns();
+  drawRibbon();
+}
+
+function maxColumns(){
+  return Math.max(1, Math.floor(canvas.getBoundingClientRect().width / COL_W));
+}
+
+function trimColumns(){
+  const max = maxColumns();
+  if(columns.length > max) columns = columns.slice(columns.length - max);
+}
+
+function drawRibbon(){
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#E9E6F0";
+  ctx.fillRect(0, 0, w, h);
+  columns.forEach((value, i) => {
+    const x = w - (columns.length - i) * COL_W;
+    if(value === null){
+      ctx.fillStyle = "#DCD8E4";
+      ctx.fillRect(x, h/2 - 1, COL_W - 1, 2);
+    }else{
+      const bar = Math.max(3, (value / 100) * h);
+      ctx.fillStyle = smileColor(value);
+      ctx.fillRect(x, h - bar, COL_W - 1, bar);
+    }
+  });
+}
+
+// 低い＝青紫(110,99,166) → 高い＝山吹(240,169,59)
+function smileColor(value){
+  const k = Math.min(1, value / 70);
+  const r = Math.round(110 + (240 - 110) * k);
+  const g = Math.round( 99 + (169 -  99) * k);
+  const b = Math.round(166 + ( 59 - 166) * k);
+  return `rgb(${r},${g},${b})`;
+}
+
+/* ---------- 補助 ---------- */
+function setStatus(kind, text){
+  dot.className = "dot" + (kind ? " " + kind : "");
+  statusText.textContent = text;
+}
+
+function describeError(err){
+  const name = err?.name || "";
+  if(name === "NotAllowedError") return "カメラの使用が許可されていません。アドレスバーのカメラアイコンから許可して、もう一度お試しください。";
+  if(name === "NotFoundError")   return "カメラが見つかりません。内蔵カメラまたは外付けカメラを接続してください。";
+  if(location.protocol === "file:") return "file:// ではカメラを使えません。ターミナルで python3 -m http.server 8000 を実行し、http://localhost:8000/smile-watch.html を開いてください。";
+  return "解析モデルを読み込めませんでした。ネットワーク接続を確認して、もう一度お試しください。";
+}
+</script>
+</body>
+</html>
