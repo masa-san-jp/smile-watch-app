@@ -280,9 +280,9 @@ const MESSAGES = {
   wake:[
     "まぶたが重くなってきています。少し目を閉じて休みませんか。",
     "眠気のサインが出ています。席を立って、水を一杯どうぞ。",
-    "20分の仮眠は、2時間ねばるより効くことがあります。",
+    "短い休憩や仮眠をとれるなら、いまがその頃合いかもしれません。",
     "画面から目を離して、遠くを20秒だけ見つめてみてください。",
-    "明るい場所へ移ると、眠気は少し引きます。",
+    "明るい場所へ移ってみるのは、どうでしょう。",
     "背筋を伸ばして、肩を大きく回してみましょう。",
     "窓を開けて、外の空気を入れてみませんか。",
     "無理に押し切らず、いちど休憩を挟みましょう。"
@@ -340,7 +340,10 @@ let cheerTimer = null;
 let sessionNo = 0;
 let logRows = [];
 let logEvents = [];
-let savedCount = -1;     // 最後に書き出したときの件数
+// 記録が変わるたびに増やす通し番号。件数で比べると MAX_ROWS 到達後（古い行を捨てるので
+// 件数が動かない）や、行を増やさない start/stop/baseline/cheer イベントを取りこぼす。
+let revision = 0;
+let savedRevision = 0;   // 最後に書き出した時点の revision
 
 smileThreshold.addEventListener("input", () => smileThresholdOut.textContent = smileThreshold.value);
 wakeThreshold.addEventListener("input", () => wakeThresholdOut.textContent = wakeThreshold.value);
@@ -351,7 +354,10 @@ jsonBtn.addEventListener("click", exportJson);
 clearBtn.addEventListener("click", clearLog);
 window.addEventListener("resize", resizeAll);
 window.addEventListener("beforeunload", (e) => {
-  if(logRows.length && logRows.length !== savedCount){ e.preventDefault(); e.returnValue = ""; }
+  if((logRows.length || logEvents.length) && revision !== savedRevision){
+    e.preventDefault();
+    e.returnValue = "";
+  }
 });
 
 resizeAll();
@@ -538,6 +544,8 @@ function calibrate(manual, metrics){
     return;
   }
   baseline = { perclos:m.perclos, fluct:m.fluct, asym:m.asym };
+  // 基準が変わるとスコアの意味が変わるので、覚醒側の継続計測はいったん捨てて次のサンプルから取り直す
+  lowSince.wake = null;
   showBaseline();
   addEvent(performance.now(), "baseline", { manual:!!manual, ...baseline });
   if(manual){
@@ -621,11 +629,13 @@ function recordRow(now, d){
     eyeOpen: m ? round(m.open, 4) : null
   });
   if(logRows.length > MAX_ROWS) logRows.splice(0, logRows.length - MAX_ROWS);
+  revision++;
   updateRecordUi();
 }
 
 function addEvent(now, type, detail){
   logEvents.push({ epochMs:Math.round(wallTime(now)), type, ...detail });
+  revision++;
   updateRecordUi();
 }
 
@@ -663,8 +673,8 @@ function exportCsv(){
       cell(r.perclos), cell(r.fluct), cell(r.asym), cell(r.eyeOpen)
     ].join(","));
   }
-  // Excel が UTF-8 と判別できるよう BOM を付ける
-  download(`smile-watch-${stamp()}.csv`, "﻿" + lines.join("\r\n") + "\r\n", "text/csv;charset=utf-8");
+  // Excel が UTF-8 と判別できるよう BOM を付ける（不可視文字なのでエスケープで書く）
+  download(`smile-watch-${stamp()}.csv`, "\uFEFF" + lines.join("\r\n") + "\r\n", "text/csv;charset=utf-8");
 }
 
 function exportJson(){
@@ -704,7 +714,11 @@ function clearLog(){
   if(!confirm(`記録 ${logRows.length.toLocaleString("ja-JP")} 件を消します。書き出していない分は元に戻せません。`)) return;
   logRows = [];
   logEvents = [];
-  savedCount = -1;
+  revision++;
+  // 見守り中に消すと現在セッションの start も消えてしまい、以後の行が
+  // 開始イベントのないまま書き出される。境界を入れ直して履歴を保つ。
+  if(running) addEvent(performance.now(), "start", { session:sessionNo, afterClear:true });
+  savedRevision = revision;   // 消した直後は書き出すものがない
   updateRecordUi();
 }
 
@@ -717,7 +731,8 @@ function download(filename, text, mime){
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  savedCount = logRows.length;
+  // 呼び出し元が本文を組み立ててからここまで待ちが入らないので、この revision が書き出した内容と一致する
+  savedRevision = revision;
 }
 
 function cell(v){ return v === null || v === undefined ? "" : v; }
