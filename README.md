@@ -88,6 +88,17 @@ Chrome / Edge / Safari のデスクトップ版。
 
 [20260801-smile-watch-app-design.md](20260801-smile-watch-app-design.md)
 
+## テスト
+
+実カメラなしで、覚醒スコアの算出から書き出しまでを通しで確認する回帰テストがあります。
+
+```bash
+npm install
+npm test
+```
+
+詳しくは [tests/README.md](tests/README.md) を参照してください。
+
 ## ライセンス
 
 MIT License
