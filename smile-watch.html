@@ -16,6 +16,8 @@
     --ink-soft:#6B6579;
     --cool:#6E63A6;
     --warm:#F0A93B;
+    --wake:#3E8E7E;
+    --drowsy:#C4574E;
     --idle:#C8C4D2;
     --radius:14px;
   }
@@ -41,6 +43,10 @@
     font-family:"Zen Maru Gothic",sans-serif;font-weight:700;
     font-size:20px;margin:0;letter-spacing:.04em;
   }
+  h2{
+    font-family:"Zen Maru Gothic",sans-serif;font-weight:500;
+    font-size:14px;margin:0;letter-spacing:.04em;
+  }
   .status{
     display:flex;align-items:center;gap:8px;
     font-size:13px;color:var(--ink-soft);margin-left:auto;
@@ -58,16 +64,21 @@
   button:hover{opacity:.85;}
   button:disabled{opacity:.4;cursor:default;}
   button.off{background:transparent;color:var(--ink);}
+  button.small{font-size:13px;padding:7px 15px;}
+  button.danger{border-color:#B8756E;color:#A8433B;}
   button:focus-visible{outline:2px solid var(--cool);outline-offset:3px;}
 
-  .now{padding:34px 0 8px;}
+  .cards{
+    padding:30px 0 4px;display:grid;gap:26px;
+    grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+  }
   .score{
     font-family:"M PLUS 1 Code",monospace;font-weight:200;
-    font-size:clamp(64px,13vw,104px);line-height:1;
+    font-size:clamp(56px,10vw,88px);line-height:1;
     letter-spacing:-.02em;font-variant-numeric:tabular-nums;
   }
   .score .unit{font-size:.3em;margin-left:.15em;color:var(--ink-soft);}
-  .score-label{margin:6px 0 22px;font-size:13px;color:var(--ink-soft);}
+  .score-label{margin:6px 0 18px;font-size:13px;color:var(--ink-soft);}
 
   .ribbon-wrap{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:12px;}
   canvas{display:block;width:100%;height:88px;border-radius:6px;}
@@ -77,10 +88,30 @@
     color:var(--ink-soft);padding-top:8px;
   }
 
+  .subs{
+    margin:12px 0 0;display:grid;gap:2px;
+    grid-template-columns:repeat(3,1fr);
+  }
+  .subs div{display:grid;gap:1px;}
+  .subs dt{font-size:11px;color:var(--ink-soft);}
+  .subs dd{
+    margin:0;font-family:"M PLUS 1 Code",monospace;font-size:13px;
+    font-variant-numeric:tabular-nums;
+  }
+  .subs .base{display:block;font-size:10px;color:var(--ink-soft);}
+
   .cheer{
-    margin-top:18px;padding:22px 24px;border-radius:var(--radius);
+    margin-top:20px;padding:20px 24px;border-radius:var(--radius);
     background:linear-gradient(100deg,#FBF3E4,#F3EFFA);
     border:1px solid #E6DCC9;
+  }
+  .cheer.wake{
+    background:linear-gradient(100deg,#F7E8E6,#EDF3F1);
+    border-color:#E2CBC7;
+  }
+  .cheer .tag{
+    display:inline-block;font-size:11px;letter-spacing:.08em;
+    color:var(--ink-soft);margin-bottom:4px;
   }
   .cheer p{
     margin:0;font-family:"Zen Maru Gothic",sans-serif;font-weight:500;
@@ -108,7 +139,19 @@
     font-family:inherit;font-size:14px;padding:7px 10px;
     border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);
   }
+
+  .record{
+    margin-top:26px;border-top:1px solid var(--line);padding-top:22px;
+  }
+  .record-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;}
+  .record-head .count{
+    font-family:"M PLUS 1 Code",monospace;font-size:12px;color:var(--ink-soft);
+    margin-left:auto;font-variant-numeric:tabular-nums;
+  }
+  .record-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;}
+
   .note{margin-top:22px;font-size:12px;color:var(--ink-soft);}
+  .note.tight{margin-top:12px;}
   .note.alert{color:#A8433B;}
 </style>
 </head>
@@ -120,23 +163,55 @@
     <button id="toggleBtn">見守りを始める</button>
   </header>
 
-  <section class="now">
-    <div class="score"><span id="scoreValue">--</span><span class="unit">%</span></div>
-    <p class="score-label">直近1分の笑顔スコア</p>
-    <div class="ribbon-wrap">
-      <canvas id="ribbon"></canvas>
-      <div class="axis"><span>5分前</span><span>いま</span></div>
-    </div>
+  <section class="cards">
+    <article>
+      <div class="score"><span id="smileValue">--</span><span class="unit">%</span></div>
+      <p class="score-label">直近1分の笑顔スコア</p>
+      <div class="ribbon-wrap">
+        <canvas id="smileRibbon"></canvas>
+        <div class="axis"><span>5分前</span><span>いま</span></div>
+      </div>
+    </article>
+
+    <article>
+      <div class="score"><span id="wakeValue">--</span><span class="unit">/100</span></div>
+      <p class="score-label">直近1分の覚醒スコア</p>
+      <div class="ribbon-wrap">
+        <canvas id="wakeRibbon"></canvas>
+        <div class="axis"><span>5分前</span><span>いま</span></div>
+      </div>
+      <dl class="subs">
+        <div>
+          <dt>PERCLOS</dt>
+          <dd id="perclosOut">--<span class="base" id="perclosBase">基準 --</span></dd>
+        </div>
+        <div>
+          <dt>開瞼ゆらぎ</dt>
+          <dd id="fluctOut">--<span class="base" id="fluctBase">基準 --</span></dd>
+        </div>
+        <div>
+          <dt>左右差</dt>
+          <dd id="asymOut">--<span class="base" id="asymBase">基準 --</span></dd>
+        </div>
+      </dl>
+    </article>
   </section>
 
-  <section class="cheer" id="cheer" aria-live="polite" hidden><p id="cheerText"></p></section>
+  <section class="cheer" id="cheer" aria-live="polite" hidden>
+    <span class="tag" id="cheerTag"></span>
+    <p id="cheerText"></p>
+  </section>
 
   <section class="panel">
     <video id="video" playsinline muted></video>
     <div class="controls">
       <div class="field">
-        <label for="threshold">励ますしきい値 <b id="thresholdOut">20</b></label>
-        <input type="range" id="threshold" min="5" max="60" step="1" value="20">
+        <label for="smileThreshold">笑顔のしきい値 <b id="smileThresholdOut">20</b></label>
+        <input type="range" id="smileThreshold" min="5" max="60" step="1" value="20">
+      </div>
+      <div class="field">
+        <label for="wakeThreshold">覚醒のしきい値 <b id="wakeThresholdOut">45</b></label>
+        <input type="range" id="wakeThreshold" min="20" max="80" step="1" value="45">
       </div>
       <div class="field">
         <label for="duration">判定時間</label>
@@ -147,7 +222,23 @@
           <option value="120">120秒つづいたら</option>
         </select>
       </div>
+      <div>
+        <button id="calibrateBtn" class="off small" disabled>いまの状態を基準にする</button>
+      </div>
     </div>
+  </section>
+
+  <section class="record">
+    <div class="record-head">
+      <h2>記録</h2>
+      <span class="count" id="logCount">0 件</span>
+    </div>
+    <div class="record-actions">
+      <button id="csvBtn" class="off small" disabled>CSVで書き出す</button>
+      <button id="jsonBtn" class="off small" disabled>JSONで書き出す</button>
+      <button id="clearBtn" class="off small danger" disabled>記録を消す</button>
+    </div>
+    <p class="note tight" id="recordNote">1 秒ごとのスコアをブラウザのメモリにためています。書き出されるのは数値だけで、映像や画像は含まれません。ページを閉じると記録は消えます。</p>
   </section>
 
   <p class="note" id="note">映像はこのパソコンの中だけで処理します。録画も送信もしません。</p>
@@ -157,54 +248,114 @@
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 /* ---------- 定数 ---------- */
-const SAMPLE_MS   = 200;      // サンプリング間隔
+const APP_VERSION = "2.0";
+const SAMPLE_MS   = 200;      // サンプリング間隔（5fps）
 const WINDOW_MS   = 60_000;   // 表示スコアの移動平均窓
 const WARMUP_MS   = 30_000;   // 判定開始までのウォームアップ
 const ABSENT_MS   = 10_000;   // 不在とみなすまでの時間
 const COOLDOWN_MS = 300_000;  // 励ましのクールダウン
 const COL_W       = 3;        // リボン1本の幅(px) = 1秒
-const MESSAGES = [
-  "ひと息いれよう。肩を下ろして、深呼吸をひとつ。",
-  "いい調子。ここまで進んだのは、あなたの手です。",
-  "窓の外を10秒だけ見てみる。目も気持ちもゆるみます。",
-  "完璧じゃなくていい。今日の分は今日の分。",
-  "水を一杯どうぞ。体が軽くなると、顔もゆるみます。",
-  "難しい顔になっていました。いちど立ち上がってみませんか。",
-  "うまくいかない時間も、ちゃんと進んでいる時間です。",
-  "口角を1ミリ上げるだけで、脳は少しだまされます。ためしに。"
-];
+const MAX_ROWS    = 28_800;   // 記録の上限（1秒 × 8時間）
+
+// 覚醒スコアの算出パラメータ
+const CLOSED_AT   = 0.20;     // 開瞼度がこれ未満なら閉眼（PERCLOS P80 相当）
+const OPEN_PHASE  = 0.50;     // 開瞼中とみなす下限（まばたきを除外する）
+const MIN_FACE    = 60;       // 覚醒スコアを出すのに必要な有効サンプル数（12秒分）
+const MIN_OPEN    = 30;       // ゆらぎ・左右差を出すのに必要な開瞼サンプル数
+const DEFAULT_BASE = { perclos:0.05, fluct:0.015, asym:0.015 };  // 基準を取る前の暫定値
+const SPAN = { perclos:0.35, fluct:0.14, asym:0.12 };  // 基準からこれだけ離れたら減点満点
+const WEIGHT = { perclos:0.5, fluct:0.3, asym:0.2 };
+
+const MESSAGES = {
+  smile:[
+    "ひと息いれよう。肩を下ろして、深呼吸をひとつ。",
+    "いい調子。ここまで進んだのは、あなたの手です。",
+    "窓の外を10秒だけ見てみる。目も気持ちもゆるみます。",
+    "完璧じゃなくていい。今日の分は今日の分。",
+    "水を一杯どうぞ。体が軽くなると、顔もゆるみます。",
+    "難しい顔になっていました。いちど立ち上がってみませんか。",
+    "うまくいかない時間も、ちゃんと進んでいる時間です。",
+    "口角を1ミリ上げるだけで、脳は少しだまされます。ためしに。"
+  ],
+  wake:[
+    "まぶたが重くなってきています。少し目を閉じて休みませんか。",
+    "眠気のサインが出ています。席を立って、水を一杯どうぞ。",
+    "20分の仮眠は、2時間ねばるより効くことがあります。",
+    "画面から目を離して、遠くを20秒だけ見つめてみてください。",
+    "明るい場所へ移ると、眠気は少し引きます。",
+    "背筋を伸ばして、肩を大きく回してみましょう。",
+    "窓を開けて、外の空気を入れてみませんか。",
+    "無理に押し切らず、いちど休憩を挟みましょう。"
+  ]
+};
+const CHEER_TAG = { smile:"笑顔", wake:"覚醒" };
 
 /* ---------- 要素 ---------- */
 const video = document.getElementById("video");
-const canvas = document.getElementById("ribbon");
-const ctx = canvas.getContext("2d");
 const dot = document.getElementById("dot");
 const statusText = document.getElementById("statusText");
 const toggleBtn = document.getElementById("toggleBtn");
-const scoreValue = document.getElementById("scoreValue");
+const smileValue = document.getElementById("smileValue");
+const wakeValue = document.getElementById("wakeValue");
 const cheer = document.getElementById("cheer");
+const cheerTag = document.getElementById("cheerTag");
 const cheerText = document.getElementById("cheerText");
 const note = document.getElementById("note");
-const thresholdInput = document.getElementById("threshold");
-const thresholdOut = document.getElementById("thresholdOut");
+const smileThreshold = document.getElementById("smileThreshold");
+const smileThresholdOut = document.getElementById("smileThresholdOut");
+const wakeThreshold = document.getElementById("wakeThreshold");
+const wakeThresholdOut = document.getElementById("wakeThresholdOut");
 const durationInput = document.getElementById("duration");
+const calibrateBtn = document.getElementById("calibrateBtn");
+const perclosOut = document.getElementById("perclosOut");
+const fluctOut = document.getElementById("fluctOut");
+const asymOut = document.getElementById("asymOut");
+const perclosBase = document.getElementById("perclosBase");
+const fluctBase = document.getElementById("fluctBase");
+const asymBase = document.getElementById("asymBase");
+const logCount = document.getElementById("logCount");
+const csvBtn = document.getElementById("csvBtn");
+const jsonBtn = document.getElementById("jsonBtn");
+const clearBtn = document.getElementById("clearBtn");
+
+const ribbons = {
+  smile:{ canvas:document.getElementById("smileRibbon"), ctx:null, columns:[], color:smileColor },
+  wake: { canvas:document.getElementById("wakeRibbon"),  ctx:null, columns:[], color:wakeColor  }
+};
+for(const r of Object.values(ribbons)) r.ctx = r.canvas.getContext("2d");
 
 /* ---------- 状態 ---------- */
 let landmarker = null;
 let stream = null;
 let running = false;
-let samples = [];        // {t, score|null} 直近60秒
-let columns = [];        // 1秒ごとの平均 (number|null)
-let secondBuf = [];
-let lastSample = 0, lastColumn = 0, lastFaceAt = 0, startedAt = 0;
-let lowSince = null, lastCheerAt = 0, lastMessage = -1;
+let samples = [];        // 直近60秒 {t, face, smile, openL, openR}
+let secondBuf = [];      // 1秒分のバッファ
+let lastSample = 0, lastColumn = 0, lastFaceAt = 0, startedAt = 0, startedWall = 0;
+let baseline = null;     // {perclos, fluct, asym}
+let lowSince = { smile:null, wake:null };
+let lastCheerAt = -Infinity;   // performance.now() は読み込みからの経過msなので 0 だと初回が抑制される
+let lastMessage = { smile:-1, wake:-1 };
 let cheerTimer = null;
 
-thresholdInput.addEventListener("input", () => thresholdOut.textContent = thresholdInput.value);
+let sessionNo = 0;
+let logRows = [];
+let logEvents = [];
+let savedCount = -1;     // 最後に書き出したときの件数
+
+smileThreshold.addEventListener("input", () => smileThresholdOut.textContent = smileThreshold.value);
+wakeThreshold.addEventListener("input", () => wakeThresholdOut.textContent = wakeThreshold.value);
 toggleBtn.addEventListener("click", () => running ? stop() : start());
-window.addEventListener("resize", resizeCanvas);
-resizeCanvas();
-drawRibbon();
+calibrateBtn.addEventListener("click", () => calibrate(true));
+csvBtn.addEventListener("click", exportCsv);
+jsonBtn.addEventListener("click", exportJson);
+clearBtn.addEventListener("click", clearLog);
+window.addEventListener("resize", resizeAll);
+window.addEventListener("beforeunload", (e) => {
+  if(logRows.length && logRows.length !== savedCount){ e.preventDefault(); e.returnValue = ""; }
+});
+
+resizeAll();
+updateRecordUi();
 
 /* ---------- 開始 / 停止 ---------- */
 async function start(){
@@ -226,24 +377,36 @@ async function start(){
   note.className = "note";
   note.textContent = "映像はこのパソコンの中だけで処理します。録画も送信もしません。";
   running = true;
-  samples = []; columns = []; secondBuf = [];
+  samples = []; secondBuf = [];
+  for(const r of Object.values(ribbons)) r.columns = [];
+  baseline = null;
+  showBaseline();
   startedAt = performance.now();
+  startedWall = Date.now();
   lastColumn = startedAt; lastFaceAt = startedAt;
-  lowSince = null; lastCheerAt = 0;
+  lowSince = { smile:null, wake:null };
+  lastCheerAt = -Infinity;
+  sessionNo += 1;
+  addEvent(startedAt, "start", { session:sessionNo });
   toggleBtn.disabled = false;
   toggleBtn.textContent = "見守りを止める";
   toggleBtn.classList.add("off");
+  calibrateBtn.disabled = false;
   setStatus("live", "見守り中");
   requestAnimationFrame(loop);
 }
 
 function stop(){
+  if(running) addEvent(performance.now(), "stop", { session:sessionNo });
   running = false;
   stopStream();
   toggleBtn.textContent = "見守りを始める";
   toggleBtn.classList.remove("off");
+  calibrateBtn.disabled = true;
   setStatus("", "停止中");
-  scoreValue.textContent = "--";
+  smileValue.textContent = "--";
+  wakeValue.textContent = "--";
+  showMetrics(null);
   hideCheer();
 }
 
@@ -279,73 +442,156 @@ function loop(){
   const now = performance.now();
   if(now - lastSample >= SAMPLE_MS && video.readyState >= 2){
     lastSample = now;
-    samples.push({ t:now, score:readSmile(now) });
+    const sample = readFrame(now);
+    samples.push(sample);
+    secondBuf.push(sample);
     while(samples.length && now - samples[0].t > WINDOW_MS) samples.shift();
   }
   if(now - lastColumn >= 1000){
     lastColumn = now;
-    columns.push(average(secondBuf));
+    tick(now);
     secondBuf = [];
-    trimColumns();
-    drawRibbon();
-    judge(now);
   }
   requestAnimationFrame(loop);
 }
 
-function readSmile(now){
+function readFrame(now){
   const result = landmarker.detectForVideo(video, now);
   const shapes = result.faceBlendshapes?.[0]?.categories;
-  if(!shapes){ secondBuf.push(null); return null; }
-  const left  = shapes.find(c => c.categoryName === "mouthSmileLeft")?.score ?? 0;
-  const right = shapes.find(c => c.categoryName === "mouthSmileRight")?.score ?? 0;
-  const score = Math.min(100, (left + right) / 2 * 100);
+  if(!shapes) return { t:now, face:false, smile:null, openL:null, openR:null };
+  const at = name => shapes.find(c => c.categoryName === name)?.score ?? 0;
+  const smile = Math.min(100, (at("mouthSmileLeft") + at("mouthSmileRight")) / 2 * 100);
+  // 開瞼度: eyeBlink ブレンドシェイプ（1=閉眼）を反転して 0..1 の開き具合にする
+  const openL = clamp(1 - at("eyeBlinkLeft"), 0, 1);
+  const openR = clamp(1 - at("eyeBlinkRight"), 0, 1);
   lastFaceAt = now;
-  secondBuf.push(score);
-  return score;
+  return { t:now, face:true, smile, openL, openR };
 }
 
-function average(list){
-  const valid = list.filter(v => typeof v === "number");
-  if(!valid.length) return null;
-  return valid.reduce((a,b) => a+b, 0) / valid.length;
+/* 1秒ごとの集計・描画・記録・判定 */
+function tick(now){
+  const faceSeen = secondBuf.some(s => s.face);
+  const smileSecond = average(secondBuf.filter(s => s.face).map(s => s.smile));
+  const smileNow = average(samples.filter(s => s.face).map(s => s.smile));
+
+  const metrics = eyeMetrics(samples);
+  if(!baseline && metrics && now - startedAt >= WARMUP_MS) calibrate(false, metrics);
+  const wakeNow = metrics ? wakeScore(metrics) : null;
+
+  smileValue.textContent = smileNow === null ? "--" : Math.round(smileNow);
+  wakeValue.textContent  = wakeNow  === null ? "--" : wakeNow;
+  showMetrics(metrics);
+
+  pushColumn("smile", faceSeen ? smileSecond : null);
+  pushColumn("wake",  faceSeen ? wakeNow : null);
+  drawRibbon("smile");
+  drawRibbon("wake");
+
+  recordRow(now, { faceSeen, smileSecond, smileNow, wakeNow, metrics });
+  judge(now, smileNow, wakeNow);
+}
+
+/* ---------- 覚醒度の推定 ----------
+   NEC「顔映像からの眠気（覚醒度）推定技術」が挙げるまぶたの2特徴
+   （開瞼状態の時間的ゆらぎ／左右まぶたの非同期＝左右差）と、
+   古典的な PERCLOS（閉眼時間の割合）を組み合わせて 0–100 に丸めている。
+   いずれも 5fps 程度の低フレームレートで捉えられる遅い変化。          */
+function eyeMetrics(list){
+  const faced = list.filter(s => s.face);
+  if(faced.length < MIN_FACE) return null;
+
+  const open = faced.map(s => (s.openL + s.openR) / 2);
+  const perclos = open.filter(v => v < CLOSED_AT).length / open.length;
+
+  // まばたきの瞬間を除いた「開瞼中」のサンプルだけでゆらぎと左右差を見る
+  const opened = faced.filter(s => (s.openL + s.openR) / 2 >= OPEN_PHASE);
+  let fluct = null, asym = null;
+  if(opened.length >= MIN_OPEN){
+    fluct = stdev(opened.map(s => (s.openL + s.openR) / 2));
+    asym  = average(opened.map(s => Math.abs(s.openL - s.openR)));
+  }
+  return { perclos, fluct, asym, open:average(open), samples:faced.length };
+}
+
+function wakeScore(m){
+  const base = baseline || DEFAULT_BASE;
+  const penalty = key => {
+    const value = m[key];
+    // 開瞼サンプルが足りない＝ほぼ閉じている、とみなして減点を満点にする
+    if(value === null || value === undefined) return 1;
+    return clamp((value - base[key]) / SPAN[key], 0, 1);
+  };
+  const total =
+    WEIGHT.perclos * penalty("perclos") +
+    WEIGHT.fluct   * penalty("fluct")   +
+    WEIGHT.asym    * penalty("asym");
+  return Math.round(clamp(100 * (1 - total), 0, 100));
+}
+
+function calibrate(manual, metrics){
+  const m = metrics || eyeMetrics(samples);
+  if(!m || m.fluct === null){
+    if(manual){
+      note.className = "note alert";
+      note.textContent = "基準を取れませんでした。カメラに顔が写った状態で、10秒ほどおいてからもう一度お試しください。";
+    }
+    return;
+  }
+  baseline = { perclos:m.perclos, fluct:m.fluct, asym:m.asym };
+  showBaseline();
+  addEvent(performance.now(), "baseline", { manual:!!manual, ...baseline });
+  if(manual){
+    note.className = "note";
+    note.textContent = "いまの状態を平常時の基準にしました。覚醒スコアはここからの変化で判定します。";
+  }
 }
 
 /* ---------- 判定 ---------- */
-function judge(now){
-  const current = average(samples.map(s => s.score));
-  scoreValue.textContent = current === null ? "--" : Math.round(current);
-
+function judge(now, smileNow, wakeNow){
   if(now - lastFaceAt > ABSENT_MS){
     setStatus("wait", "一時停止（顔が見つかりません）");
-    lowSince = null;
+    lowSince = { smile:null, wake:null };
     return;
   }
   setStatus("live", "見守り中");
+  if(now - startedAt < WARMUP_MS) return;
 
-  if(current === null || now - startedAt < WARMUP_MS) return;
+  const held = kind => {
+    const value = kind === "smile" ? smileNow : wakeNow;
+    const limit = Number(kind === "smile" ? smileThreshold.value : wakeThreshold.value);
+    if(value === null){ lowSince[kind] = null; return false; }
+    if(value >= limit){ lowSince[kind] = null; return false; }
+    if(lowSince[kind] === null) lowSince[kind] = now;
+    return now - lowSince[kind] >= Number(durationInput.value) * 1000;
+  };
 
-  if(current < Number(thresholdInput.value)){
-    if(lowSince === null) lowSince = now;
-    const held = now - lowSince >= Number(durationInput.value) * 1000;
-    const ready = now - lastCheerAt >= COOLDOWN_MS;
-    if(held && ready){ showCheer(); lastCheerAt = now; lowSince = null; }
-  }else{
-    lowSince = null;
-  }
+  const wakeHeld = held("wake");
+  const smileHeld = held("smile");
+  if(now - lastCheerAt < COOLDOWN_MS) return;
+
+  // 眠気のほうが急ぎなので優先する
+  const kind = wakeHeld ? "wake" : (smileHeld ? "smile" : null);
+  if(!kind) return;
+  showCheer(kind, now);
+  lastCheerAt = now;
+  lowSince[kind] = null;
 }
 
-function showCheer(){
-  let index = Math.floor(Math.random() * MESSAGES.length);
-  if(index === lastMessage) index = (index + 1) % MESSAGES.length;
-  lastMessage = index;
-  cheerText.textContent = MESSAGES[index];
+function showCheer(kind, now){
+  const list = MESSAGES[kind];
+  let index = Math.floor(Math.random() * list.length);
+  if(index === lastMessage[kind]) index = (index + 1) % list.length;
+  lastMessage[kind] = index;
+  cheerTag.textContent = CHEER_TAG[kind];
+  cheerText.textContent = list[index];
+  cheer.classList.toggle("wake", kind === "wake");
   cheer.hidden = false;
   cheer.classList.remove("enter");
   void cheer.offsetWidth;
   cheer.classList.add("enter");
   clearTimeout(cheerTimer);
   cheerTimer = setTimeout(hideCheer, 20_000);
+  addEvent(now, "cheer", { kind, message:list[index] });
 }
 
 function hideCheer(){
@@ -354,55 +600,236 @@ function hideCheer(){
   cheer.classList.remove("enter");
 }
 
-/* ---------- 描画 ---------- */
-function resizeCanvas(){
-  const dpr = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = Math.max(1, Math.round(rect.width * dpr));
-  canvas.height = Math.max(1, Math.round(rect.height * dpr));
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  trimColumns();
-  drawRibbon();
+/* ---------- 記録 ---------- */
+function wallTime(now){
+  return startedWall + (now - startedAt);
 }
 
-function maxColumns(){
-  return Math.max(1, Math.floor(canvas.getBoundingClientRect().width / COL_W));
+function recordRow(now, d){
+  const m = d.metrics;
+  logRows.push({
+    session: sessionNo,
+    epochMs: Math.round(wallTime(now)),
+    elapsed: Math.round((now - startedAt) / 1000),
+    face: d.faceSeen,
+    smile: round(d.smileSecond, 1),
+    smileAvg: round(d.smileNow, 1),
+    wake: d.wakeNow,
+    perclos: m ? round(m.perclos, 4) : null,
+    fluct: m ? round(m.fluct, 4) : null,
+    asym: m ? round(m.asym, 4) : null,
+    eyeOpen: m ? round(m.open, 4) : null
+  });
+  if(logRows.length > MAX_ROWS) logRows.splice(0, logRows.length - MAX_ROWS);
+  updateRecordUi();
 }
 
-function trimColumns(){
-  const max = maxColumns();
-  if(columns.length > max) columns = columns.slice(columns.length - max);
+function addEvent(now, type, detail){
+  logEvents.push({ epochMs:Math.round(wallTime(now)), type, ...detail });
+  updateRecordUi();
 }
 
-function drawRibbon(){
-  const rect = canvas.getBoundingClientRect();
+function updateRecordUi(){
+  logCount.textContent = `${logRows.length.toLocaleString("ja-JP")} 件`;
+  const empty = logRows.length === 0;
+  csvBtn.disabled = empty;
+  jsonBtn.disabled = empty;
+  clearBtn.disabled = empty;
+}
+
+const CSV_HEADERS = [
+  ["session",  "セッション"],
+  ["time",     "記録時刻"],
+  ["elapsed",  "経過秒"],
+  ["face",     "顔検出"],
+  ["smile",    "笑顔スコア"],
+  ["smileAvg", "笑顔スコア_1分平均"],
+  ["wake",     "覚醒スコア"],
+  ["perclos",  "PERCLOS"],
+  ["fluct",    "開瞼ゆらぎ"],
+  ["asym",     "左右差"],
+  ["eyeOpen",  "平均開瞼度"]
+];
+
+function exportCsv(){
+  const lines = [CSV_HEADERS.map(h => h[1]).join(",")];
+  for(const r of logRows){
+    lines.push([
+      r.session,
+      localTime(r.epochMs),
+      r.elapsed,
+      r.face ? 1 : 0,
+      cell(r.smile), cell(r.smileAvg), cell(r.wake),
+      cell(r.perclos), cell(r.fluct), cell(r.asym), cell(r.eyeOpen)
+    ].join(","));
+  }
+  // Excel が UTF-8 と判別できるよう BOM を付ける
+  download(`smile-watch-${stamp()}.csv`, "﻿" + lines.join("\r\n") + "\r\n", "text/csv;charset=utf-8");
+}
+
+function exportJson(){
+  const payload = {
+    app:"笑顔ウォッチ",
+    version:APP_VERSION,
+    exportedAt:new Date().toISOString(),
+    settings:{
+      sampleMs:SAMPLE_MS,
+      windowMs:WINDOW_MS,
+      smileThreshold:Number(smileThreshold.value),
+      wakeThreshold:Number(wakeThreshold.value),
+      durationSec:Number(durationInput.value),
+      cooldownMs:COOLDOWN_MS,
+      baseline
+    },
+    fields:{
+      session:"見守りの開始ごとに増える通し番号",
+      epochMs:"記録時刻（UNIX ミリ秒）",
+      elapsed:"そのセッションの開始からの経過秒",
+      face:"その1秒に顔を検出できたか",
+      smile:"その1秒の笑顔スコア平均（0-100）",
+      smileAvg:"直近60秒の笑顔スコア平均（0-100）",
+      wake:"直近60秒から求めた覚醒スコア（0-100）",
+      perclos:"直近60秒で開瞼度が0.2未満だったサンプルの割合",
+      fluct:"開瞼中サンプルの開瞼度の標準偏差（時間的ゆらぎ）",
+      asym:"開瞼中サンプルの左右開瞼度の差の平均（左右差）",
+      eyeOpen:"直近60秒の平均開瞼度（0-1、1=全開）"
+    },
+    events:logEvents,
+    samples:logRows
+  };
+  download(`smile-watch-${stamp()}.json`, JSON.stringify(payload, null, 2), "application/json");
+}
+
+function clearLog(){
+  if(!confirm(`記録 ${logRows.length.toLocaleString("ja-JP")} 件を消します。書き出していない分は元に戻せません。`)) return;
+  logRows = [];
+  logEvents = [];
+  savedCount = -1;
+  updateRecordUi();
+}
+
+function download(filename, text, mime){
+  const url = URL.createObjectURL(new Blob([text], { type:mime }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  savedCount = logRows.length;
+}
+
+function cell(v){ return v === null || v === undefined ? "" : v; }
+
+function localTime(ms){
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function stamp(){
+  const d = new Date();
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/* ---------- 表示 ---------- */
+function showMetrics(m){
+  perclosOut.firstChild.textContent = m ? (m.perclos * 100).toFixed(1) + "%" : "--";
+  fluctOut.firstChild.textContent   = m && m.fluct !== null ? m.fluct.toFixed(3) : "--";
+  asymOut.firstChild.textContent    = m && m.asym  !== null ? m.asym.toFixed(3)  : "--";
+}
+
+function showBaseline(){
+  const b = baseline;
+  perclosBase.textContent = "基準 " + (b ? (b.perclos * 100).toFixed(1) + "%" : "--");
+  fluctBase.textContent   = "基準 " + (b ? b.fluct.toFixed(3) : "--");
+  asymBase.textContent    = "基準 " + (b ? b.asym.toFixed(3)  : "--");
+}
+
+function pushColumn(key, value){
+  const r = ribbons[key];
+  r.columns.push(value === undefined ? null : value);
+  trimColumns(key);
+}
+
+function resizeAll(){
+  for(const key of Object.keys(ribbons)){
+    const r = ribbons[key];
+    const dpr = window.devicePixelRatio || 1;
+    const rect = r.canvas.getBoundingClientRect();
+    r.canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    r.canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    r.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    trimColumns(key);
+    drawRibbon(key);
+  }
+}
+
+function trimColumns(key){
+  const r = ribbons[key];
+  const max = Math.max(1, Math.floor(r.canvas.getBoundingClientRect().width / COL_W));
+  if(r.columns.length > max) r.columns = r.columns.slice(r.columns.length - max);
+}
+
+function drawRibbon(key){
+  const r = ribbons[key];
+  const rect = r.canvas.getBoundingClientRect();
   const w = rect.width, h = rect.height;
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#E9E6F0";
-  ctx.fillRect(0, 0, w, h);
-  columns.forEach((value, i) => {
-    const x = w - (columns.length - i) * COL_W;
+  r.ctx.clearRect(0, 0, w, h);
+  r.ctx.fillStyle = "#E9E6F0";
+  r.ctx.fillRect(0, 0, w, h);
+  r.columns.forEach((value, i) => {
+    const x = w - (r.columns.length - i) * COL_W;
     if(value === null){
-      ctx.fillStyle = "#DCD8E4";
-      ctx.fillRect(x, h/2 - 1, COL_W - 1, 2);
+      r.ctx.fillStyle = "#DCD8E4";
+      r.ctx.fillRect(x, h/2 - 1, COL_W - 1, 2);
     }else{
       const bar = Math.max(3, (value / 100) * h);
-      ctx.fillStyle = smileColor(value);
-      ctx.fillRect(x, h - bar, COL_W - 1, bar);
+      r.ctx.fillStyle = r.color(value);
+      r.ctx.fillRect(x, h - bar, COL_W - 1, bar);
     }
   });
 }
 
-// 低い＝青紫(110,99,166) → 高い＝山吹(240,169,59)
+// 笑顔: 低い＝青紫(110,99,166) → 高い＝山吹(240,169,59)
 function smileColor(value){
-  const k = Math.min(1, value / 70);
-  const r = Math.round(110 + (240 - 110) * k);
-  const g = Math.round( 99 + (169 -  99) * k);
-  const b = Math.round(166 + ( 59 - 166) * k);
-  return `rgb(${r},${g},${b})`;
+  return mix([110,99,166], [240,169,59], Math.min(1, value / 70));
+}
+
+// 覚醒: 低い＝赤茶(196,87,78) → 高い＝青緑(62,142,126)
+function wakeColor(value){
+  return mix([196,87,78], [62,142,126], clamp(value / 100, 0, 1));
+}
+
+function mix(a, b, k){
+  const c = a.map((v, i) => Math.round(v + (b[i] - v) * k));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
 /* ---------- 補助 ---------- */
+function average(list){
+  const valid = list.filter(v => typeof v === "number" && !Number.isNaN(v));
+  if(!valid.length) return null;
+  return valid.reduce((a, b) => a + b, 0) / valid.length;
+}
+
+function stdev(list){
+  if(list.length < 2) return null;
+  const mean = list.reduce((a, b) => a + b, 0) / list.length;
+  const variance = list.reduce((a, v) => a + (v - mean) ** 2, 0) / list.length;
+  return Math.sqrt(variance);
+}
+
+function clamp(v, lo, hi){ return v < lo ? lo : v > hi ? hi : v; }
+
+function round(v, digits){
+  if(v === null || v === undefined) return null;
+  const f = 10 ** digits;
+  return Math.round(v * f) / f;
+}
+
 function setStatus(kind, text){
   dot.className = "dot" + (kind ? " " + kind : "");
   statusText.textContent = text;
