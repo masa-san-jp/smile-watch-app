@@ -141,6 +141,13 @@
     border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);
   }
 
+  .report{
+    margin-top:20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  }
+  .report-label{font-size:13px;color:var(--ink-soft);}
+  .report-buttons{display:flex;gap:8px;}
+  .report-hint{font-size:11px;color:var(--ink-soft);flex:1;min-width:200px;}
+
   .check label{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-soft);cursor:pointer;}
   .check input{accent-color:var(--cool);}
   .rate-note{margin:8px 0 0;font-size:11px;color:#A8433B;}
@@ -226,6 +233,16 @@
     <p id="cheerText"></p>
   </section>
 
+  <section class="report">
+    <span class="report-label">いまの調子</span>
+    <div class="report-buttons">
+      <button id="reportSleepy" class="off small" disabled>眠い</button>
+      <button id="reportNormal" class="off small" disabled>ふつう</button>
+      <button id="reportSharp"  class="off small" disabled>冴えてる</button>
+    </div>
+    <span class="report-hint" id="reportHint">見守り中に押すと、そのときのスコアと一緒に記録します（1 / 2 / 3 キーでも）。</span>
+  </section>
+
   <section class="panel">
     <video id="video" playsinline muted></video>
     <div class="controls">
@@ -278,6 +295,7 @@
       </article>
     </div>
     <p class="note tight" id="reviewSummary">まだ振り返るだけの記録がありません。</p>
+    <p class="note tight" id="agreement"></p>
   </section>
 
   <section class="record">
@@ -395,6 +413,13 @@ const logCount = document.getElementById("logCount");
 const recordNote = document.getElementById("recordNote");
 const reviewBtn = document.getElementById("reviewBtn");
 const reviewSummary = document.getElementById("reviewSummary");
+const agreement = document.getElementById("agreement");
+const reportHint = document.getElementById("reportHint");
+const reportButtons = {
+  sleepy: document.getElementById("reportSleepy"),
+  normal: document.getElementById("reportNormal"),
+  sharp:  document.getElementById("reportSharp")
+};
 const dayAxis = document.getElementById("dayAxis");
 const exportRange = document.getElementById("exportRange");
 const csvBtn = document.getElementById("csvBtn");
@@ -441,6 +466,16 @@ wakeThreshold.addEventListener("input", () => wakeThresholdOut.textContent = wak
 for(const el of [smileThreshold, wakeThreshold, durationInput]) el.addEventListener("change", saveSettings);
 reviewBtn.addEventListener("click", refreshReview);
 notifyToggle.addEventListener("change", toggleNotify);
+for(const [level, button] of Object.entries(reportButtons)) button.addEventListener("click", () => report(level));
+// 1 / 2 / 3 で申告できるようにする。入力欄を操作しているときは邪魔しない
+window.addEventListener("keydown", e => {
+  if(e.metaKey || e.ctrlKey || e.altKey) return;
+  // 値を入れる部品だけ避ける。ボタンを除くと、申告ボタンを押した直後は
+  // フォーカスがそこに残るため、続けてキーで申告できなくなる
+  if(e.target.closest("input, select, textarea, [contenteditable]")) return;
+  const level = { "1":"sleepy", "2":"normal", "3":"sharp" }[e.key];
+  if(level) report(level);
+});
 toggleBtn.addEventListener("click", () => running ? stop() : start());
 calibrateBtn.addEventListener("click", () => calibrate(true));
 csvBtn.addEventListener("click", exportCsv);
@@ -476,6 +511,7 @@ async function init(){
     : "このブラウザでは記録を保存できないため、タブを閉じると消えます（プライベートウィンドウなどでは保存できません）。";
   updateRecordUi();
   await refreshReview();
+  await refreshAgreement();
 }
 
 /* ---------- 設定の保存 ---------- */
@@ -538,6 +574,7 @@ async function start(){
   toggleBtn.textContent = "見守りを止める";
   toggleBtn.classList.add("off");
   calibrateBtn.disabled = false;
+  for(const button of Object.values(reportButtons)) button.disabled = false;
   setStatus("live", "見守り中");
   loop();
 }
@@ -555,6 +592,7 @@ function stop(){
   toggleBtn.textContent = "見守りを始める";
   toggleBtn.classList.remove("off");
   calibrateBtn.disabled = true;
+  for(const button of Object.values(reportButtons)) button.disabled = true;
   setStatus("", "停止中");
   smileValue.textContent = "--";
   wakeValue.textContent = "--";
@@ -1008,6 +1046,92 @@ async function readSince(name, fromMs){
   }catch{ return []; }
 }
 
+/* ---------- 自己申告 ----------
+   覚醒スコアは実際の眠気と対応づけた検証をしていない。体感を同じ土俵に並べて
+   記録しておけば、あとから「このスコアは当たっているのか」を数字で確かめられる。
+   重みや幅を詰め直すときの材料にもなるので、そのときの生の指標も一緒に残す。 */
+const LEVELS = {
+  sleepy:{ label:"眠い",     value:0   },
+  normal:{ label:"ふつう",   value:50  },
+  sharp: { label:"冴えてる", value:100 }
+};
+const MIN_REPORTS = 9;   // 対応の強さを言うのに最低限ほしい回数
+
+function report(level){
+  if(!running || !LEVELS[level]) return;
+  const m = eyeMetrics(samples);
+  const wake = m ? wakeScore(m) : null;
+  const smile = average(samples.filter(s => s.face).map(s => s.smile));
+
+  addEvent(performance.now(), "report", {
+    level,
+    subjective: LEVELS[level].value,
+    wake,
+    smile: round(smile, 1),
+    perclos: m ? round(m.perclos, 4) : null,
+    fluct:   m ? round(m.fluct, 4)   : null,
+    asym:    m ? round(m.asym, 4)    : null,
+    hz:      m ? round(m.hz, 2)      : null,
+    baseline
+  });
+
+  reportHint.textContent = wake === null
+    ? `「${LEVELS[level].label}」を記録しました。まだ覚醒スコアが出ていないので、突き合わせには使えません。`
+    : `「${LEVELS[level].label}」を記録しました（そのときの覚醒スコアは ${wake}）。`;
+  refreshAgreement();
+}
+
+async function readReports(){
+  const events = db ? (await readSince("events", null)).concat(pendingEvents) : pendingEvents.slice();
+  return events.filter(e => e.type === "report" && typeof e.wake === "number");
+}
+
+async function refreshAgreement(){
+  agreement.textContent = describeAgreement(await readReports());
+}
+
+function describeAgreement(reports){
+  if(!reports.length){
+    return "「いまの調子」を押しておくと、覚醒スコアが体感と合っているかをここで突き合わせます。";
+  }
+
+  const levels = Object.keys(LEVELS).map(key => {
+    const list = reports.filter(r => r.level === key);
+    return { key, label:LEVELS[key].label, n:list.length, wake:average(list.map(r => r.wake)) };
+  }).filter(l => l.n);
+
+  const summary = levels.map(l => `${l.label} ${Math.round(l.wake)}（${l.n}回）`).join(" / ");
+  if(reports.length < MIN_REPORTS){
+    return `申告ごとの平均覚醒スコアは ${summary}。あと ${MIN_REPORTS - reports.length} 回ほど申告すると、対応の強さも出します。`;
+  }
+
+  const r = correlation(reports.map(x => x.subjective), reports.map(x => x.wake));
+  // 眠い→ふつう→冴えてる の順にスコアも上がっていれば、少なくとも向きは合っている
+  const rising = levels.every((l, i) => i === 0 || l.wake >= levels[i - 1].wake);
+  const strength = r === null ? "—"
+    : `${r.toFixed(2)}（${Math.abs(r) >= 0.5 ? "そこそこ対応している" : "対応は弱い"}）`;
+
+  return `申告ごとの平均覚醒スコアは ${summary}。${reports.length} 回ぶんの相関は ${strength}。` +
+    (rising
+      ? "申告と同じ向きに動いています。"
+      : "申告の順序とは一致していません。しきい値や重みの見直しが要りそうです。");
+}
+
+// ピアソンの相関係数
+function correlation(xs, ys){
+  const n = xs.length;
+  if(n < 2) return null;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for(let i = 0; i < n; i++){
+    const dx = xs[i] - mx, dy = ys[i] - my;
+    sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+  }
+  const denom = Math.sqrt(sxx * syy);
+  return denom === 0 ? null : sxy / denom;   // どちらかが一定だと定義できない
+}
+
 /* ---------- 振り返り ----------
    保存済みの行を集計して、日ごとと時間帯別の平均を出す。
    30 日ぶんは数十万行になりうるので、getAll で持ち上げずカーソルで足しながら進む。 */
@@ -1334,6 +1458,7 @@ async function clearLog(){
   if(running) addEvent(performance.now(), "start", { session:sessionNo, afterClear:true });
   updateRecordUi();
   await refreshReview();
+  await refreshAgreement();
 }
 
 function download(filename, text, mime){
