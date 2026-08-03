@@ -39,6 +39,26 @@ const browser = await chromium.launch({
   args:["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]
 });
 const context = await browser.newContext({ permissions:["camera"], acceptDownloads:true });
+
+// 通知は実際には出せないので、呼ばれたことだけ控える差し替えを入れる。
+// document.hidden も、裏に回った状態を作れるようテストから操作できるようにする。
+await context.addInitScript(() => {
+  window.__notifications = [];
+  window.__hidden = false;
+  class FakeNotification {
+    constructor(title, options){
+      window.__notifications.push({ title, body:options?.body, tag:options?.tag });
+    }
+    static permission = "granted";
+    static requestPermission(){ return Promise.resolve("granted"); }
+  }
+  window.Notification = FakeNotification;
+  Object.defineProperty(Document.prototype, "hidden", {
+    configurable:true,
+    get(){ return window.__hidden === true; }
+  });
+});
+
 const page = await context.newPage();
 
 const pageErrors = [];
@@ -263,10 +283,10 @@ try{
   const lines = csv.replace(/^﻿/, "").trimEnd().split("\r\n");
   check("CSV が CRLF 区切り", csv.includes("\r\n"));
   check("CSV の見出しが期待どおり",
-    lines[0] === "セッション,記録時刻,経過秒,顔検出,笑顔スコア,笑顔スコア_1分平均,覚醒スコア,PERCLOS,開瞼ゆらぎ,左右差,平均開瞼度",
+    lines[0] === "セッション,記録時刻,経過秒,この行がおおう秒数,顔検出,笑顔スコア,笑顔スコア_1分平均,覚醒スコア,PERCLOS,開瞼ゆらぎ,左右差,平均開瞼度,サンプリング毎秒",
     lines[0]);
   const widths = new Set(lines.map(l => l.split(",").length));
-  check("CSV の全行が 11 列", widths.size === 1 && widths.has(11), [...widths].join("/"));
+  check("CSV の全行が 13 列", widths.size === 1 && widths.has(13), [...widths].join("/"));
   check("CSV の時刻が YYYY-MM-DD HH:MM:SS 形式",
     /^\d+,\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},/.test(lines[1]), lines[1]);
 
@@ -277,7 +297,7 @@ try{
   check("JSON に設定値と基準が入る",
     json.settings.smileThreshold === 20 && json.settings.wakeThreshold === 45 &&
     json.settings.baseline !== null);
-  check("JSON に列の説明が入る", Object.keys(json.fields).length === 11);
+  check("JSON に列の説明が入る", Object.keys(json.fields).length === 13, `${Object.keys(json.fields).length}`);
   check("JSON にイベント履歴が入る",
     json.events.some(e => e.type === "start") &&
     json.events.some(e => e.type === "baseline") &&
@@ -289,6 +309,12 @@ try{
   check("JSON の覚醒スコアが 0–100 の範囲",
     scored.length > 0 && scored.every(s => s.wake >= 0 && s.wake <= 100));
   check("JSON に映像・画像が含まれない", !JSON.stringify(json).includes("data:image"));
+  check("各行がおおう秒数を持つ",
+    json.samples.every(s => typeof s.spanSec === "number" && s.spanSec >= 1),
+    JSON.stringify(json.samples.slice(0, 2).map(s => s.spanSec)));
+  const measured = json.samples.filter(s => s.hz !== null);
+  check("実効サンプリング毎秒を記録する", measured.length > 0 && measured.every(s => s.hz > 0),
+    `${measured.length} 件`);
   check("再読み込み前に記録した行も書き出される",
     new Set(json.samples.map(s => s.session)).size >= 2,
     [...new Set(json.samples.map(s => s.session))].join(","));
@@ -439,8 +465,39 @@ try{
   check("復元した値が画面のラベルにも出る",
     (await text("#wakeThresholdOut")) === "62", await text("#wakeThresholdOut"));
 
+  /* ===== 13. 裏で動いているときの扱い ===== */
+  section("13. 裏で動いているときの扱い");
+  // サンプリングが粗いと 0.1〜0.4 秒のまばたきを取りこぼすので、PERCLOS は使えない
+  const fast = { perclos:0.40, fluct:0.015, asym:0.015, open:0.9, hz:5 };
+  const slow = { ...fast, hz:1 };
+  const fastScore = await hook(m => window.__test.wakeScoreFor(m), fast);
+  const slowScore = await hook(m => window.__test.wakeScoreFor(m), slow);
+  check("十分な頻度なら PERCLOS を使う", await hook(m => window.__test.usesPerclos(m), fast));
+  check("頻度が落ちたら PERCLOS を使わない", !(await hook(m => window.__test.usesPerclos(m), slow)));
+  check("PERCLOS が高くても、頻度が落ちていれば減点しない",
+    fastScore < 60 && slowScore > 90, `${fastScore} → ${slowScore}`);
+
+  // 通知は、このタブを見ていないときだけ出す
+  await page.evaluate(() => { window.__notifications = []; window.__hidden = false; });
+  await page.check("#notifyToggle");
+  await wait(200);
+  check("通知を有効にできる", await page.isChecked("#notifyToggle"));
+
+  await hook(() => window.__test.showCheer("wake"));
+  check("画面を見ているときは通知しない",
+    (await page.evaluate(() => window.__notifications.length)) === 0);
+
+  await page.evaluate(() => { window.__hidden = true; });
+  await hook(() => window.__test.showCheer("wake"));
+  const sent = await page.evaluate(() => window.__notifications.slice());
+  check("裏に回っているときは通知する", sent.length === 1, JSON.stringify(sent));
+  check("通知に励ましの文面が入る",
+    sent[0] && sent[0].title.includes("覚醒") && sent[0].body.length > 0, JSON.stringify(sent[0]));
+  check("通知が積み上がらないよう tag を固定する", sent[0]?.tag === "smile-watch", sent[0]?.tag);
+  await page.evaluate(() => { window.__hidden = false; });
+
   /* ===== 仕上げ ===== */
-  section("13. 実行時エラー");
+  section("14. 実行時エラー");
   check("JavaScript エラーが出ていない", pageErrors.length === 0, pageErrors.join(" / "));
 
 }finally{

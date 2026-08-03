@@ -141,6 +141,11 @@
     border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);
   }
 
+  .check label{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-soft);cursor:pointer;}
+  .check input{accent-color:var(--cool);}
+  .rate-note{margin:8px 0 0;font-size:11px;color:#A8433B;}
+  .rate-note[hidden]{display:none;}
+
   .review{
     margin-top:26px;border-top:1px solid var(--line);padding-top:22px;
   }
@@ -212,6 +217,7 @@
           <dd id="asymOut">--<span class="base" id="asymBase">基準 --</span></dd>
         </div>
       </dl>
+      <p class="rate-note" id="rateNote" hidden></p>
     </article>
   </section>
 
@@ -239,6 +245,9 @@
           <option value="90" selected>90秒つづいたら</option>
           <option value="120">120秒つづいたら</option>
         </select>
+      </div>
+      <div class="check">
+        <label><input type="checkbox" id="notifyToggle"> 別のアプリで作業中も通知で知らせる</label>
       </div>
       <div>
         <button id="calibrateBtn" class="off small" disabled>いまの状態を基準にする</button>
@@ -321,8 +330,14 @@ const CDN = {
 // 覚醒スコアの算出パラメータ
 const CLOSED_AT   = 0.20;     // 開瞼度がこれ未満なら閉眼（PERCLOS P80 相当）
 const OPEN_PHASE  = 0.50;     // 開瞼中とみなす下限（まばたきを除外する）
-const MIN_FACE    = 60;       // 覚醒スコアを出すのに必要な有効サンプル数（12秒分）
-const MIN_OPEN    = 30;       // ゆらぎ・左右差を出すのに必要な開瞼サンプル数
+// 有効サンプルは「何個あるか」ではなく「どれだけの時間をおおっているか」で見る。
+// 裏に回るとブラウザがタイマーを間引くので、個数で決めると条件が変わってしまう。
+const MIN_FACE_MS = 12_000;   // 覚醒スコアを出すのに必要な、顔が写っていた時間
+const MIN_FACE_N  = 8;        // かつ最低これだけのサンプル
+const MIN_OPEN_N  = 6;        // ゆらぎ・左右差を出すのに必要な開瞼サンプル数
+// まばたきは 0.1〜0.4 秒。これを下回る頻度でしか見ていないと PERCLOS は当てにならない
+const LOW_RATE_HZ = 2.5;
+const MAX_SPAN_S  = 60;       // 1 行がおおう秒数の上限
 const DEFAULT_BASE = { perclos:0.05, fluct:0.015, asym:0.015 };  // 基準を取る前の暫定値
 const SPAN = { perclos:0.35, fluct:0.14, asym:0.12 };  // 基準からこれだけ離れたら減点満点
 const WEIGHT = { perclos:0.5, fluct:0.3, asym:0.2 };
@@ -368,6 +383,8 @@ const wakeThreshold = document.getElementById("wakeThreshold");
 const wakeThresholdOut = document.getElementById("wakeThresholdOut");
 const durationInput = document.getElementById("duration");
 const calibrateBtn = document.getElementById("calibrateBtn");
+const notifyToggle = document.getElementById("notifyToggle");
+const rateNote = document.getElementById("rateNote");
 const perclosOut = document.getElementById("perclosOut");
 const fluctOut = document.getElementById("fluctOut");
 const asymOut = document.getElementById("asymOut");
@@ -408,6 +425,8 @@ let lowSince = { smile:null, wake:null };
 let lastCheerAt = -Infinity;   // performance.now() は読み込みからの経過msなので 0 だと初回が抑制される
 let lastMessage = { smile:-1, wake:-1 };
 let cheerTimer = null;
+let loopTimer = null;
+let notifyOn = false;          // 別のアプリで作業中も通知するか
 
 let sessionNo = 0;
 let db = null;                 // IndexedDB。開けなければ null（その回だけメモリで持つ）
@@ -421,6 +440,7 @@ smileThreshold.addEventListener("input", () => smileThresholdOut.textContent = s
 wakeThreshold.addEventListener("input", () => wakeThresholdOut.textContent = wakeThreshold.value);
 for(const el of [smileThreshold, wakeThreshold, durationInput]) el.addEventListener("change", saveSettings);
 reviewBtn.addEventListener("click", refreshReview);
+notifyToggle.addEventListener("change", toggleNotify);
 toggleBtn.addEventListener("click", () => running ? stop() : start());
 calibrateBtn.addEventListener("click", () => calibrate(true));
 csvBtn.addEventListener("click", exportCsv);
@@ -465,6 +485,9 @@ async function loadSettings(){
     if(saved.smile    !== undefined) smileThreshold.value = saved.smile;
     if(saved.wake     !== undefined) wakeThreshold.value = saved.wake;
     if(saved.duration !== undefined) durationInput.value = saved.duration;
+    // 許可が取り消されていることもあるので、保存値だけを信じない
+    notifyOn = Boolean(saved.notify) && "Notification" in window && Notification.permission === "granted";
+    notifyToggle.checked = notifyOn;
   }
   smileThresholdOut.textContent = smileThreshold.value;
   wakeThresholdOut.textContent = wakeThreshold.value;
@@ -474,7 +497,8 @@ function saveSettings(){
   metaSet("settings", {
     smile:Number(smileThreshold.value),
     wake:Number(wakeThreshold.value),
-    duration:durationInput.value
+    duration:durationInput.value,
+    notify:notifyOn
   });
 }
 
@@ -515,7 +539,7 @@ async function start(){
   toggleBtn.classList.add("off");
   calibrateBtn.disabled = false;
   setStatus("live", "見守り中");
-  requestAnimationFrame(loop);
+  loop();
 }
 
 function stop(){
@@ -525,6 +549,8 @@ function stop(){
     flush().then(refreshReview);
   }
   running = false;
+  clearTimeout(loopTimer);
+  loopTimer = null;
   stopStream();
   toggleBtn.textContent = "見守りを始める";
   toggleBtn.classList.remove("off");
@@ -597,7 +623,11 @@ function privacyNote(){
     : "映像はこのパソコンの中だけで処理します。録画も送信もしません。解析モデルは初回のみ CDN から取得します。";
 }
 
-/* ---------- 計測ループ ---------- */
+/* ---------- 計測ループ ----------
+   requestAnimationFrame は裏に回ると止まるため、別のアプリで作業している間は
+   まったく計測できなかった。setTimeout ならブラウザに間引かれても動き続ける。
+   ただし間引かれた分だけサンプルは粗くなるので、1 行がおおう秒数を持たせて、
+   あとの集計が実時間とずれないようにする。                                  */
 function loop(){
   if(!running) return;
   const now = performance.now();
@@ -609,11 +639,12 @@ function loop(){
     while(samples.length && now - samples[0].t > WINDOW_MS) samples.shift();
   }
   if(now - lastColumn >= 1000){
+    const span = clamp(Math.round((now - lastColumn) / 1000), 1, MAX_SPAN_S);
     lastColumn = now;
-    tick(now);
+    tick(now, span);
     secondBuf = [];
   }
-  requestAnimationFrame(loop);
+  loopTimer = setTimeout(loop, SAMPLE_MS);
 }
 
 function readFrame(now){
@@ -629,8 +660,8 @@ function readFrame(now){
   return { t:now, face:true, smile, openL, openR };
 }
 
-/* 1秒ごとの集計・描画・記録・判定 */
-function tick(now){
+/* 1秒ごと（裏に回っているときはもっと間隔が空く）の集計・描画・記録・判定 */
+function tick(now, span){
   const faceSeen = secondBuf.some(s => s.face);
   const smileSecond = average(secondBuf.filter(s => s.face).map(s => s.smile));
   const smileNow = average(samples.filter(s => s.face).map(s => s.smile));
@@ -648,7 +679,7 @@ function tick(now){
   drawRibbon("smile");
   drawRibbon("wake");
 
-  recordRow(now, { faceSeen, smileSecond, smileNow, wakeNow, metrics });
+  recordRow(now, { faceSeen, smileSecond, smileNow, wakeNow, metrics, span });
   judge(now, smileNow, wakeNow);
 }
 
@@ -659,7 +690,10 @@ function tick(now){
    いずれも 5fps 程度の低フレームレートで捉えられる遅い変化。          */
 function eyeMetrics(list){
   const faced = list.filter(s => s.face);
-  if(faced.length < MIN_FACE) return null;
+  if(faced.length < MIN_FACE_N) return null;
+  const spanMs = faced[faced.length - 1].t - faced[0].t;
+  if(spanMs < MIN_FACE_MS) return null;
+  const hz = faced.length / (spanMs / 1000);
 
   const open = faced.map(s => (s.openL + s.openR) / 2);
   const perclos = open.filter(v => v < CLOSED_AT).length / open.length;
@@ -667,13 +701,17 @@ function eyeMetrics(list){
   // まばたきの瞬間を除いた「開瞼中」のサンプルだけでゆらぎと左右差を見る
   const opened = faced.filter(s => (s.openL + s.openR) / 2 >= OPEN_PHASE);
   let fluct = null, asym = null;
-  if(opened.length >= MIN_OPEN){
+  if(opened.length >= MIN_OPEN_N){
     fluct = stdev(opened.map(s => (s.openL + s.openR) / 2));
     asym  = average(opened.map(s => Math.abs(s.openL - s.openR)));
   }
-  return { perclos, fluct, asym, open:average(open), samples:faced.length };
+  return { perclos, fluct, asym, open:average(open), hz, samples:faced.length };
 }
 
+/* 減点を重みで合成する。裏に回ってサンプリングが粗くなると、0.1〜0.4 秒の
+   まばたきを取りこぼして PERCLOS が当てにならなくなるので、そのときは
+   PERCLOS を外し、残る 2 つの重みを配分し直す。ゆらぎと左右差はもともと
+   遅い変化なので、粗いサンプリングでも意味が残る。                        */
 function wakeScore(m){
   const base = baseline || DEFAULT_BASE;
   const penalty = key => {
@@ -682,12 +720,16 @@ function wakeScore(m){
     if(value === null || value === undefined) return 1;
     return clamp((value - base[key]) / SPAN[key], 0, 1);
   };
-  const total =
-    WEIGHT.perclos * penalty("perclos") +
-    WEIGHT.fluct   * penalty("fluct")   +
-    WEIGHT.asym    * penalty("asym");
-  return Math.round(clamp(100 * (1 - total), 0, 100));
+  const keys = usesPerclos(m) ? ["perclos", "fluct", "asym"] : ["fluct", "asym"];
+  let total = 0, weight = 0;
+  for(const key of keys){
+    total += WEIGHT[key] * penalty(key);
+    weight += WEIGHT[key];
+  }
+  return Math.round(clamp(100 * (1 - total / weight), 0, 100));
 }
+
+function usesPerclos(m){ return !m || m.hz === undefined || m.hz >= LOW_RATE_HZ; }
 
 function calibrate(manual, metrics){
   const m = metrics || eyeMetrics(samples);
@@ -754,7 +796,49 @@ function showCheer(kind, now){
   cheer.classList.add("enter");
   clearTimeout(cheerTimer);
   cheerTimer = setTimeout(hideCheer, 20_000);
-  addEvent(now, "cheer", { kind, message:list[index] });
+  notify(kind, list[index]);
+  addEvent(now, "cheer", { kind, message:list[index], notified:shouldNotify() });
+}
+
+/* ---------- 通知 ----------
+   カードはこのタブを見ていないと気づけない。別のアプリで作業している間は
+   通知で届ける。見えているときは今までどおりカードだけにする。            */
+function shouldNotify(){
+  return notifyOn && document.hidden && "Notification" in window && Notification.permission === "granted";
+}
+
+function notify(kind, message){
+  if(!shouldNotify()) return;
+  try{
+    // tag を固定して、たまった通知が積み上がらないようにする
+    new Notification(`笑顔ウォッチ・${CHEER_TAG[kind]}`, { body:message, tag:"smile-watch" });
+  }catch{ /* 通知できなくても計測は続ける */ }
+}
+
+async function toggleNotify(){
+  if(!notifyToggle.checked){
+    notifyOn = false;
+    saveSettings();
+    return;
+  }
+  if(!("Notification" in window)){
+    notifyToggle.checked = false;
+    notifyOn = false;
+    note.className = "note alert";
+    note.textContent = "このブラウザは通知に対応していません。画面のカードでお知らせします。";
+    return;
+  }
+  // 許可を求められるのは操作をきっかけにしたときだけなので、ここで聞く
+  const permission = Notification.permission === "granted"
+    ? "granted"
+    : await Notification.requestPermission();
+  notifyOn = permission === "granted";
+  notifyToggle.checked = notifyOn;
+  if(!notifyOn){
+    note.className = "note alert";
+    note.textContent = "通知が許可されませんでした。アドレスバーの設定から許可できます。画面のカードでは引き続きお知らせします。";
+  }
+  saveSettings();
 }
 
 function hideCheer(){
@@ -774,6 +858,7 @@ function recordRow(now, d){
     session: sessionNo,
     epochMs: Math.round(wallTime(now)),
     elapsed: Math.round((now - startedAt) / 1000),
+    spanSec: d.span,
     face: d.faceSeen,
     smile: round(d.smileSecond, 1),
     smileAvg: round(d.smileNow, 1),
@@ -781,7 +866,8 @@ function recordRow(now, d){
     perclos: m ? round(m.perclos, 4) : null,
     fluct: m ? round(m.fluct, 4) : null,
     asym: m ? round(m.asym, 4) : null,
-    eyeOpen: m ? round(m.open, 4) : null
+    eyeOpen: m ? round(m.open, 4) : null,
+    hz: m ? round(m.hz, 2) : null
   });
   scheduleFlush();
   updateRecordUi();
@@ -937,7 +1023,8 @@ function startOfDay(ms){
 function emptyBucket(){ return { wake:0, wakeN:0, smile:0, smileN:0, sec:0 }; }
 
 function addTo(bucket, row){
-  bucket.sec++;
+  // 裏に回ると 1 行が数秒〜数十秒をおおう。行数で数えると実時間とずれる
+  bucket.sec += row.spanSec ?? 1;
   if(typeof row.wake === "number"){ bucket.wake += row.wake; bucket.wakeN++; }
   if(typeof row.smileAvg === "number"){ bucket.smile += row.smileAvg; bucket.smileN++; }
 }
@@ -1112,6 +1199,7 @@ const CSV_HEADERS = [
   ["session",  "セッション"],
   ["time",     "記録時刻"],
   ["elapsed",  "経過秒"],
+  ["spanSec",  "この行がおおう秒数"],
   ["face",     "顔検出"],
   ["smile",    "笑顔スコア"],
   ["smileAvg", "笑顔スコア_1分平均"],
@@ -1119,7 +1207,8 @@ const CSV_HEADERS = [
   ["perclos",  "PERCLOS"],
   ["fluct",    "開瞼ゆらぎ"],
   ["asym",     "左右差"],
-  ["eyeOpen",  "平均開瞼度"]
+  ["eyeOpen",  "平均開瞼度"],
+  ["hz",       "サンプリング毎秒"]
 ];
 
 // 書き出す範囲の始まり。null なら全期間
@@ -1171,9 +1260,10 @@ function writeCsv(rows){
       r.session,
       localTime(r.epochMs),
       r.elapsed,
+      cell(r.spanSec),
       r.face ? 1 : 0,
       cell(r.smile), cell(r.smileAvg), cell(r.wake),
-      cell(r.perclos), cell(r.fluct), cell(r.asym), cell(r.eyeOpen)
+      cell(r.perclos), cell(r.fluct), cell(r.asym), cell(r.eyeOpen), cell(r.hz)
     ].join(","));
   }
   // Excel が UTF-8 と判別できるよう BOM を付ける（不可視文字なのでエスケープで書く）
@@ -1207,6 +1297,7 @@ function writeJson(rows, events){
       session:"見守りの開始ごとに増える通し番号",
       epochMs:"記録時刻（UNIX ミリ秒）",
       elapsed:"そのセッションの開始からの経過秒",
+      spanSec:"この行がおおう秒数。裏に回って計測が粗くなると 1 より大きくなる",
       face:"その1秒に顔を検出できたか",
       smile:"その1秒の笑顔スコア平均（0-100）",
       smileAvg:"直近60秒の笑顔スコア平均（0-100）",
@@ -1214,7 +1305,8 @@ function writeJson(rows, events){
       perclos:"直近60秒で開瞼度が0.2未満だったサンプルの割合",
       fluct:"開瞼中サンプルの開瞼度の標準偏差（時間的ゆらぎ）",
       asym:"開瞼中サンプルの左右開瞼度の差の平均（左右差）",
-      eyeOpen:"直近60秒の平均開瞼度（0-1、1=全開）"
+      eyeOpen:"直近60秒の平均開瞼度（0-1、1=全開）",
+      hz:"直近60秒の実効サンプリング毎秒。2.5 未満のときは PERCLOS を除いて覚醒スコアを出している"
     },
     events,
     samples:rows
@@ -1271,6 +1363,13 @@ function stamp(){
 
 /* ---------- 表示 ---------- */
 function showMetrics(m){
+  const lowRate = m && !usesPerclos(m);
+  rateNote.hidden = !lowRate;
+  if(lowRate){
+    rateNote.textContent =
+      `サンプリングが毎秒 ${m.hz.toFixed(1)} 回まで落ちています。` +
+      "まばたきを取りこぼすため、PERCLOS を除いて覚醒スコアを出しています。";
+  }
   perclosOut.firstChild.textContent = m ? (m.perclos * 100).toFixed(1) + "%" : "--";
   fluctOut.firstChild.textContent   = m && m.fluct !== null ? m.fluct.toFixed(3) : "--";
   asymOut.firstChild.textContent    = m && m.asym  !== null ? m.asym.toFixed(3)  : "--";

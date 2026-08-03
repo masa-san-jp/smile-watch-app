@@ -46,6 +46,7 @@ export function buildPage(){
   swap("const SAMPLE_MS   = 200;",      `const SAMPLE_MS   = ${SAMPLE_MS};`);
   swap("const WINDOW_MS   = 60_000;",   `const WINDOW_MS   = ${WINDOW_MS};`);
   swap("const WARMUP_MS   = 30_000;",   `const WARMUP_MS   = ${WARMUP_MS};`);
+  swap("const MIN_FACE_MS = 12_000;",   `const MIN_FACE_MS = ${Math.round(12_000 / SPEED)};`);
   swap("const ABSENT_MS   = 10_000;",   `const ABSENT_MS   = ${Math.round(10_000 / SPEED)};`);
   swap("const COOLDOWN_MS = 300_000;",  `const COOLDOWN_MS = ${COOLDOWN_MS};`);
   swap("now - lastColumn >= 1000",      `now - lastColumn >= ${COLUMN_MS}`);
@@ -71,6 +72,9 @@ export function buildPage(){
     "    hour: charts.hour.items.map(x => ({ ...x }))",
     "  }),",
     "  settings: () => ({ smile:smileThreshold.value, wake:wakeThreshold.value, duration:durationInput.value }),",
+    "  wakeScoreFor: m => wakeScore(m),",
+    "  usesPerclos: m => usesPerclos(m),",
+    "  showCheer: kind => showCheer(kind, performance.now()),",
     "  // 指定した日・時間帯に、値の入った行を仕込む。集計の確認に使う",
     "  seedAt(daysAgo, hour, count, wake, smile, face = true){",
     "    if(!db) return Promise.resolve(0);",
