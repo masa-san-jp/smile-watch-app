@@ -26,6 +26,8 @@ export const WINDOW_MS = SAMPLE_MS * 300;      // 実機と同じ 1 窓 300 サ�
 export const COLUMN_MS = Math.round(1000 / SPEED);
 export const WARMUP_MS = Math.round(30_000 / SPEED);
 export const DURATION_SCALE = COLUMN_MS;       // 判定時間 30 秒 → 30 * COLUMN_MS
+export const RETENTION_DAYS = 30;              // アプリ側の保存期間と合わせる
+export const COOLDOWN_MS = Math.round(300_000 / SPEED);
 
 export function buildPage(){
   let html = fs.readFileSync(appPath, "utf8");
@@ -36,38 +38,48 @@ export function buildPage(){
   };
 
   swap(
-    'import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";',
-    'import { FaceLandmarker, FilesetResolver } from "./stub-vision.mjs";'
+    'await import(local ? url(local.bundle) : CDN.bundle)',
+    'await import("./stub-vision.mjs")'
   );
+  // フォントは取りに行かせない（テストを外部に依存させない）
+  swap("loadFonts();", "/* テストではフォントを読み込まない */");
   swap("const SAMPLE_MS   = 200;",      `const SAMPLE_MS   = ${SAMPLE_MS};`);
   swap("const WINDOW_MS   = 60_000;",   `const WINDOW_MS   = ${WINDOW_MS};`);
   swap("const WARMUP_MS   = 30_000;",   `const WARMUP_MS   = ${WARMUP_MS};`);
   swap("const ABSENT_MS   = 10_000;",   `const ABSENT_MS   = ${Math.round(10_000 / SPEED)};`);
-  swap("const COOLDOWN_MS = 300_000;",  `const COOLDOWN_MS = ${Math.round(300_000 / SPEED)};`);
+  swap("const COOLDOWN_MS = 300_000;",  `const COOLDOWN_MS = ${COOLDOWN_MS};`);
   swap("now - lastColumn >= 1000",      `now - lastColumn >= ${COLUMN_MS}`);
   swap("Number(durationInput.value) * 1000", `Number(durationInput.value) * ${DURATION_SCALE}`);
   swap("setTimeout(hideCheer, 20_000)", `setTimeout(hideCheer, ${Math.round(20_000 / SPEED)})`);
 
-  // Web フォントは取りに行かせない
-  html = html.replace(/<link href="https:\/\/fonts\.googleapis[^>]*>/, "");
-
-  // テスト用フック。未書き出し判定の中身と、記録上限まで一気に埋める手段を外に出す。
-  swap('window.addEventListener("beforeunload", (e) => {', [
+  // テスト用フック。保存の状態と、古い記録を仕込む手段を外に出す。
+  swap('window.addEventListener("pagehide"', [
     "window.__test = {",
-    "  isDirty: () => Boolean((logRows.length || logEvents.length) && revision !== savedRevision),",
-    "  fillToMaxRows(){",
-    "    const filler = { session:0, epochMs:0, elapsed:0, face:false, smile:null, smileAvg:null,",
-    "                     wake:null, perclos:null, fluct:null, asym:null, eyeOpen:null };",
-    "    while(logRows.length < MAX_ROWS) logRows.push({ ...filler });",
-    "    return logRows.length;",
-    "  },",
-    "  rowCount: () => logRows.length,",
-    "  events: () => logEvents.map(e => ({ ...e })),",
+    "  dbAvailable: () => Boolean(db),",
+    "  pending: () => pendingRows.length,",
+    "  stored: () => ({ ...stored }),",
+    "  total: () => totalRows(),",
+    "  session: () => sessionNo,",
+    "  flush: () => flush(),",
     "  wakeMessages: () => MESSAGES.wake.slice(),",
+    "  // 保存済みと書き込み待ちを合わせたイベント",
+    "  allEvents: () => readSince('events', null).then(rows => rows.concat(pendingEvents)),",
     "  // 覚醒スコアがしきい値を下回り続けている開始時刻。基準の取り直しで null に戻るはず",
-    "  lowSinceWake: () => lowSince.wake",
+    "  lowSinceWake: () => lowSince.wake,",
+    "  // 保存期間より古い行を仕込む。起動時に捨てられることの確認に使う",
+    "  seedOld(daysAgo, count){",
+    "    if(!db) return Promise.resolve(0);",
+    "    const when = Date.now() - daysAgo * 86400000;",
+    "    const t = db.transaction(['samples','events'], 'readwrite');",
+    "    for(let i = 0; i < count; i++){",
+    "      t.objectStore('samples').add({ session:0, epochMs:when + i, elapsed:i, face:false,",
+    "        smile:null, smileAvg:null, wake:null, perclos:null, fluct:null, asym:null, eyeOpen:null });",
+    "    }",
+    "    t.objectStore('events').add({ epochMs:when, type:'start', session:0 });",
+    "    return settled(t).then(() => refreshStored()).then(() => { updateRecordUi(); return count; });",
+    "  }",
     "};",
-    'window.addEventListener("beforeunload", (e) => {'
+    'window.addEventListener("pagehide"'
   ].join("\n"));
 
   return html;

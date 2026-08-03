@@ -6,7 +6,8 @@
 <title>笑顔ウォッチ</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500&family=M+PLUS+1+Code:wght@200;400&display=swap" rel="stylesheet">
+<!-- フォントは script 側で読み込む。vendor/ に同梱があればそちらを使い、外部へは一切出ない -->
+
 <style>
   :root{
     --paper:#EEECF3;
@@ -234,28 +235,46 @@
       <span class="count" id="logCount">0 件</span>
     </div>
     <div class="record-actions">
+      <select id="exportRange" aria-label="書き出す範囲">
+        <option value="all" selected>すべて</option>
+        <option value="today">今日</option>
+        <option value="7">過去7日</option>
+      </select>
       <button id="csvBtn" class="off small" disabled>CSVで書き出す</button>
       <button id="jsonBtn" class="off small" disabled>JSONで書き出す</button>
       <button id="clearBtn" class="off small danger" disabled>記録を消す</button>
     </div>
-    <p class="note tight" id="recordNote">1 秒ごとのスコアをブラウザのメモリにためています。書き出されるのは数値だけで、映像や画像は含まれません。ページを閉じると記録は消えます。</p>
+    <p class="note tight" id="recordNote">記録はこのブラウザに保存されます。書き出されるのは数値だけで、映像や画像は含まれません。</p>
   </section>
 
   <p class="note" id="note">映像はこのパソコンの中だけで処理します。録画も送信もしません。</p>
 </div>
 
 <script type="module">
-import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
-
 /* ---------- 定数 ---------- */
-const APP_VERSION = "2.0";
+const APP_VERSION = "3.0";
 const SAMPLE_MS   = 200;      // サンプリング間隔（5fps）
 const WINDOW_MS   = 60_000;   // 表示スコアの移動平均窓
 const WARMUP_MS   = 30_000;   // 判定開始までのウォームアップ
 const ABSENT_MS   = 10_000;   // 不在とみなすまでの時間
 const COOLDOWN_MS = 300_000;  // 励ましのクールダウン
 const COL_W       = 3;        // リボン1本の幅(px) = 1秒
-const MAX_ROWS    = 28_800;   // 記録の上限（1秒 × 8時間）
+
+// 記録の保存（IndexedDB）
+const DB_NAME     = "smile-watch";
+const DB_VERSION  = 1;
+const RETENTION_DAYS = 30;    // これより古い記録は起動時に捨てる
+const FLUSH_MS    = 5_000;    // 書き込みをまとめる間隔
+
+// 解析アセット。vendor/manifest.json があればそちらを使い、なければ CDN から取る
+const VENDOR_MANIFEST = "vendor/manifest.json";
+const VENDOR_FONTS    = "vendor/fonts.css";
+const CDN = {
+  bundle:"https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs",
+  wasm:  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
+  model: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+  fonts: "https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500&family=M+PLUS+1+Code:wght@200;400&display=swap"
+};
 
 // 覚醒スコアの算出パラメータ
 const CLOSED_AT   = 0.20;     // 開瞼度がこれ未満なら閉眼（PERCLOS P80 相当）
@@ -314,6 +333,8 @@ const perclosBase = document.getElementById("perclosBase");
 const fluctBase = document.getElementById("fluctBase");
 const asymBase = document.getElementById("asymBase");
 const logCount = document.getElementById("logCount");
+const recordNote = document.getElementById("recordNote");
+const exportRange = document.getElementById("exportRange");
 const csvBtn = document.getElementById("csvBtn");
 const jsonBtn = document.getElementById("jsonBtn");
 const clearBtn = document.getElementById("clearBtn");
@@ -338,12 +359,12 @@ let lastMessage = { smile:-1, wake:-1 };
 let cheerTimer = null;
 
 let sessionNo = 0;
-let logRows = [];
-let logEvents = [];
-// 記録が変わるたびに増やす通し番号。件数で比べると MAX_ROWS 到達後（古い行を捨てるので
-// 件数が動かない）や、行を増やさない start/stop/baseline/cheer イベントを取りこぼす。
-let revision = 0;
-let savedRevision = 0;   // 最後に書き出した時点の revision
+let db = null;                 // IndexedDB。開けなければ null（その回だけメモリで持つ）
+let pendingRows = [];          // まだ書き込んでいない行
+let pendingEvents = [];
+let flushTimer = null;
+let stored = { rows:0, from:null, to:null };   // 書き込み済みの件数と期間
+let assetSource = null;        // "local" | "cdn"
 
 smileThreshold.addEventListener("input", () => smileThresholdOut.textContent = smileThreshold.value);
 wakeThreshold.addEventListener("input", () => wakeThresholdOut.textContent = wakeThreshold.value);
@@ -352,16 +373,35 @@ calibrateBtn.addEventListener("click", () => calibrate(true));
 csvBtn.addEventListener("click", exportCsv);
 jsonBtn.addEventListener("click", exportJson);
 clearBtn.addEventListener("click", clearLog);
+exportRange.addEventListener("change", updateRecordUi);
 window.addEventListener("resize", resizeAll);
+// タブを閉じる・隠れるときに、書き込み待ちの分を取りこぼさない
+window.addEventListener("pagehide", () => flush());
+document.addEventListener("visibilitychange", () => { if(document.hidden) flush(); });
 window.addEventListener("beforeunload", (e) => {
-  if((logRows.length || logEvents.length) && revision !== savedRevision){
+  // 保存できていれば閉じても失われない。保存先が無いときだけ引き止める。
+  if(!db && (pendingRows.length || pendingEvents.length)){
     e.preventDefault();
     e.returnValue = "";
   }
 });
 
 resizeAll();
-updateRecordUi();
+loadFonts();
+init();
+
+async function init(){
+  db = await openDb();
+  if(db){
+    await prune();
+    await refreshStored();
+  }
+  sessionNo = await metaGet("session", 0);
+  recordNote.textContent = db
+    ? `記録はこのブラウザに保存され、${RETENTION_DAYS} 日分を残します。書き出されるのは数値だけで、映像や画像は含まれません。`
+    : "このブラウザでは記録を保存できないため、タブを閉じると消えます（プライベートウィンドウなどでは保存できません）。";
+  updateRecordUi();
+}
 
 /* ---------- 開始 / 停止 ---------- */
 async function start(){
@@ -381,7 +421,7 @@ async function start(){
     return;
   }
   note.className = "note";
-  note.textContent = "映像はこのパソコンの中だけで処理します。録画も送信もしません。";
+  note.textContent = privacyNote();
   running = true;
   samples = []; secondBuf = [];
   for(const r of Object.values(ribbons)) r.columns = [];
@@ -393,6 +433,7 @@ async function start(){
   lowSince = { smile:null, wake:null };
   lastCheerAt = -Infinity;
   sessionNo += 1;
+  metaSet("session", sessionNo);   // 再読み込みしても番号が続くようにする
   addEvent(startedAt, "start", { session:sessionNo });
   toggleBtn.disabled = false;
   toggleBtn.textContent = "見守りを止める";
@@ -421,13 +462,42 @@ function stopStream(){
   video.srcObject = null;
 }
 
+/* ---------- 解析アセット ----------
+   npm run fetch-assets を実行すると vendor/ に一式が置かれ、以後は外部と通信しない。
+   置かれていなければ従来どおり CDN から取る。                                    */
+async function vendored(){
+  try{
+    const res = await fetch(VENDOR_MANIFEST, { cache:"no-store" });
+    if(!res.ok) return null;
+    const m = await res.json();
+    return m?.bundle && m?.wasm && m?.model ? m : null;
+  }catch{
+    return null;    // vendor/ が無いだけ。CDN で続行する
+  }
+}
+
+async function loadFonts(){
+  let href = CDN.fonts;
+  try{
+    const res = await fetch(VENDOR_FONTS, { method:"HEAD", cache:"no-store" });
+    if(res.ok) href = VENDOR_FONTS;
+  }catch{ /* 同梱なし。CDN を使う */ }
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = href;
+  document.head.appendChild(link);
+}
+
 async function loadModel(){
-  const fileset = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-  );
+  const local = await vendored();
+  assetSource = local ? "local" : "cdn";
+  const url = p => new URL(p, location.href).href;
+
+  const { FaceLandmarker, FilesetResolver } = await import(local ? url(local.bundle) : CDN.bundle);
+  const fileset = await FilesetResolver.forVisionTasks(local ? url(local.wasm) : CDN.wasm);
   const options = {
     baseOptions:{
-      modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      modelAssetPath: local ? url(local.model) : CDN.model,
       delegate:"GPU"
     },
     outputFaceBlendshapes:true,
@@ -440,6 +510,12 @@ async function loadModel(){
     options.baseOptions.delegate = "CPU";     // GPU が使えない環境へのフォールバック
     return await FaceLandmarker.createFromOptions(fileset, options);
   }
+}
+
+function privacyNote(){
+  return assetSource === "local"
+    ? "映像はこのパソコンの中だけで処理します。解析モデルも同梱のものを使うため、外部との通信はありません。"
+    : "映像はこのパソコンの中だけで処理します。録画も送信もしません。解析モデルは初回のみ CDN から取得します。";
 }
 
 /* ---------- 計測ループ ---------- */
@@ -615,7 +691,7 @@ function wallTime(now){
 
 function recordRow(now, d){
   const m = d.metrics;
-  logRows.push({
+  pendingRows.push({
     session: sessionNo,
     epochMs: Math.round(wallTime(now)),
     elapsed: Math.round((now - startedAt) / 1000),
@@ -628,23 +704,163 @@ function recordRow(now, d){
     asym: m ? round(m.asym, 4) : null,
     eyeOpen: m ? round(m.open, 4) : null
   });
-  if(logRows.length > MAX_ROWS) logRows.splice(0, logRows.length - MAX_ROWS);
-  revision++;
+  scheduleFlush();
   updateRecordUi();
 }
 
 function addEvent(now, type, detail){
-  logEvents.push({ epochMs:Math.round(wallTime(now)), type, ...detail });
-  revision++;
+  pendingEvents.push({ epochMs:Math.round(wallTime(now)), type, ...detail });
+  scheduleFlush();
   updateRecordUi();
 }
 
+/* ---------- IndexedDB ---------- */
+function openDb(){
+  return new Promise(resolve => {
+    let req;
+    try{ req = indexedDB.open(DB_NAME, DB_VERSION); }
+    catch{ return resolve(null); }        // プライベートウィンドウなどで使えないことがある
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      for(const name of ["samples", "events"]){
+        if(!d.objectStoreNames.contains(name)){
+          d.createObjectStore(name, { autoIncrement:true }).createIndex("epochMs", "epochMs");
+        }
+      }
+      if(!d.objectStoreNames.contains("meta")) d.createObjectStore("meta", { keyPath:"key" });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => resolve(null);
+    req.onblocked = () => resolve(null);
+  });
+}
+
+function store(name, mode){ return db.transaction([name], mode).objectStore(name); }
+
+function ask(request){
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror   = () => reject(request.error);
+  });
+}
+
+function settled(transaction){
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror    = () => reject(transaction.error);
+    transaction.onabort    = () => reject(transaction.error);
+  });
+}
+
+async function metaGet(key, fallback){
+  if(!db) return fallback;
+  try{
+    const row = await ask(store("meta", "readonly").get(key));
+    return row ? row.value : fallback;
+  }catch{ return fallback; }
+}
+
+async function metaSet(key, value){
+  if(!db) return;
+  try{
+    const t = db.transaction(["meta"], "readwrite");
+    t.objectStore("meta").put({ key, value });
+    await settled(t);
+  }catch{ /* 保存できなくても計測は続ける */ }
+}
+
+function scheduleFlush(){
+  if(!db || flushTimer) return;
+  flushTimer = setTimeout(flush, FLUSH_MS);
+}
+
+// 書き込み待ちの行とイベントを 1 トランザクションで流し込む
+async function flush(){
+  clearTimeout(flushTimer);
+  flushTimer = null;
+  if(!db || (!pendingRows.length && !pendingEvents.length)) return;
+
+  const rows = pendingRows, events = pendingEvents;
+  pendingRows = []; pendingEvents = [];
+  try{
+    const t = db.transaction(["samples", "events"], "readwrite");
+    const samples = t.objectStore("samples"), log = t.objectStore("events");
+    for(const r of rows) samples.add(r);
+    for(const e of events) log.add(e);
+    await settled(t);
+    stored.rows += rows.length;
+    for(const r of rows){
+      if(stored.from === null || r.epochMs < stored.from) stored.from = r.epochMs;
+      if(stored.to   === null || r.epochMs > stored.to)   stored.to   = r.epochMs;
+    }
+  }catch{
+    // 容量超過などで書けなかったぶんは戻す。次の flush で再挑戦する
+    pendingRows = rows.concat(pendingRows);
+    pendingEvents = events.concat(pendingEvents);
+    scheduleFlush();
+  }
+  updateRecordUi();
+}
+
+async function prune(){
+  const cutoff = Date.now() - RETENTION_DAYS * 86_400_000;
+  for(const name of ["samples", "events"]){
+    try{
+      const t = db.transaction([name], "readwrite");
+      const cursor = t.objectStore(name).index("epochMs").openCursor(IDBKeyRange.upperBound(cutoff, true));
+      cursor.onsuccess = () => {
+        const c = cursor.result;
+        if(!c) return;
+        c.delete();
+        c.continue();
+      };
+      await settled(t);
+    }catch{ /* 消せなくても支障はない */ }
+  }
+}
+
+async function refreshStored(){
+  try{
+    // 3 つの要求を同じターンで出す。間に await を挟むとトランザクションが閉じてしまう
+    const samples = store("samples", "readonly");
+    const count = samples.count();
+    const index = samples.index("epochMs");
+    const oldest = index.openCursor(null, "next");
+    const newest = index.openCursor(null, "prev");
+    stored.rows = await ask(count);
+    stored.from = (await ask(oldest))?.value.epochMs ?? null;
+    stored.to   = (await ask(newest))?.value.epochMs ?? null;
+  }catch{
+    stored = { rows:0, from:null, to:null };
+  }
+}
+
+async function readSince(name, fromMs){
+  if(!db) return [];
+  try{
+    const s = store(name, "readonly");
+    return await ask(fromMs === null ? s.getAll() : s.index("epochMs").getAll(IDBKeyRange.lowerBound(fromMs)));
+  }catch{ return []; }
+}
+
+/* ---------- 表示 ---------- */
+function totalRows(){ return stored.rows + pendingRows.length; }
+
 function updateRecordUi(){
-  logCount.textContent = `${logRows.length.toLocaleString("ja-JP")} 件`;
-  const empty = logRows.length === 0;
+  const total = totalRows();
+  logCount.textContent = total ? `${total.toLocaleString("ja-JP")} 件${periodLabel()}` : "0 件";
+  const empty = total === 0;
   csvBtn.disabled = empty;
   jsonBtn.disabled = empty;
   clearBtn.disabled = empty;
+}
+
+function periodLabel(){
+  const from = stored.from ?? pendingRows[0]?.epochMs ?? null;
+  const to   = pendingRows.length ? pendingRows[pendingRows.length - 1].epochMs : stored.to;
+  if(from === null || to === null) return "";
+  const day = ms => { const d = new Date(ms); return `${d.getMonth() + 1}/${d.getDate()}`; };
+  return day(from) === day(to) ? `（${day(from)}）` : `（${day(from)}〜${day(to)}）`;
 }
 
 const CSV_HEADERS = [
@@ -661,9 +877,51 @@ const CSV_HEADERS = [
   ["eyeOpen",  "平均開瞼度"]
 ];
 
+// 書き出す範囲の始まり。null なら全期間
+function rangeStart(){
+  const v = exportRange.value;
+  if(v === "all") return null;
+  if(v === "today"){
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+  return Date.now() - Number(v) * 86_400_000;
+}
+
+// 保存済みと書き込み待ちを合わせて、時刻順に取り出す
+async function collect(){
+  await flush();
+  const from = rangeStart();
+  const within = x => from === null || x.epochMs >= from;
+  const rows   = (await readSince("samples", from)).concat(pendingRows.filter(within));
+  const events = (await readSince("events",  from)).concat(pendingEvents.filter(within));
+  rows.sort((a, b) => a.epochMs - b.epochMs);
+  events.sort((a, b) => a.epochMs - b.epochMs);
+  return { rows, events };
+}
+
+async function withBusy(button, task){
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "書き出し中…";
+  try{ await task(); }
+  finally{
+    button.textContent = label;
+    updateRecordUi();
+  }
+}
+
 function exportCsv(){
+  return withBusy(csvBtn, async () => {
+    const { rows } = await collect();
+    writeCsv(rows);
+  });
+}
+
+function writeCsv(rows){
   const lines = [CSV_HEADERS.map(h => h[1]).join(",")];
-  for(const r of logRows){
+  for(const r of rows){
     lines.push([
       r.session,
       localTime(r.epochMs),
@@ -678,13 +936,22 @@ function exportCsv(){
 }
 
 function exportJson(){
+  return withBusy(jsonBtn, async () => {
+    const { rows, events } = await collect();
+    writeJson(rows, events);
+  });
+}
+
+function writeJson(rows, events){
   const payload = {
     app:"笑顔ウォッチ",
     version:APP_VERSION,
     exportedAt:new Date().toISOString(),
+    range:exportRange.options[exportRange.selectedIndex].textContent,
     settings:{
       sampleMs:SAMPLE_MS,
       windowMs:WINDOW_MS,
+      retentionDays:RETENTION_DAYS,
       smileThreshold:Number(smileThreshold.value),
       wakeThreshold:Number(wakeThreshold.value),
       durationSec:Number(durationInput.value),
@@ -704,21 +971,30 @@ function exportJson(){
       asym:"開瞼中サンプルの左右開瞼度の差の平均（左右差）",
       eyeOpen:"直近60秒の平均開瞼度（0-1、1=全開）"
     },
-    events:logEvents,
-    samples:logRows
+    events,
+    samples:rows
   };
   download(`smile-watch-${stamp()}.json`, JSON.stringify(payload, null, 2), "application/json");
 }
 
-function clearLog(){
-  if(!confirm(`記録 ${logRows.length.toLocaleString("ja-JP")} 件を消します。書き出していない分は元に戻せません。`)) return;
-  logRows = [];
-  logEvents = [];
-  revision++;
+async function clearLog(){
+  if(!confirm(`記録 ${totalRows().toLocaleString("ja-JP")} 件をすべて消します。元に戻せません。`)) return;
+  clearTimeout(flushTimer);
+  flushTimer = null;
+  pendingRows = [];
+  pendingEvents = [];
+  if(db){
+    try{
+      const t = db.transaction(["samples", "events"], "readwrite");
+      t.objectStore("samples").clear();
+      t.objectStore("events").clear();
+      await settled(t);
+    }catch{ /* 消せなければ件数表示だけずれる。次の起動で揃う */ }
+  }
+  stored = { rows:0, from:null, to:null };
   // 見守り中に消すと現在セッションの start も消えてしまい、以後の行が
   // 開始イベントのないまま書き出される。境界を入れ直して履歴を保つ。
   if(running) addEvent(performance.now(), "start", { session:sessionNo, afterClear:true });
-  savedRevision = revision;   // 消した直後は書き出すものがない
   updateRecordUi();
 }
 
@@ -731,8 +1007,6 @@ function download(filename, text, mime){
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  // 呼び出し元が本文を組み立ててからここまで待ちが入らないので、この revision が書き出した内容と一致する
-  savedRevision = revision;
 }
 
 function cell(v){ return v === null || v === undefined ? "" : v; }

@@ -7,7 +7,7 @@
 
 import fs from "fs";
 import { chromium } from "playwright";
-import { serve, WARMUP_MS, WINDOW_MS, COLUMN_MS } from "./harness.mjs";
+import { serve, WARMUP_MS, WINDOW_MS, COLUMN_MS, RETENTION_DAYS, COOLDOWN_MS } from "./harness.mjs";
 
 const PORT = 8123;
 
@@ -72,6 +72,19 @@ try{
     null, { timeout:20_000 }
   );
 
+  // 励ましカードは 1.7 秒ほどで自動的に消えるため、出た瞬間の見た目を控えておく
+  await page.evaluate(() => {
+    window.__cards = [];
+    const card = document.getElementById("cheer");
+    new MutationObserver(() => {
+      if(card.hidden) return;
+      window.__cards.push({
+        tag: document.getElementById("cheerTag").textContent,
+        wake: card.classList.contains("wake")
+      });
+    }).observe(card, { attributes:true, attributeFilter:["hidden", "class"] });
+  });
+
   /* ===== 1. 覚醒指標 ===== */
   section("1. 覚醒指標");
   await wait(WARMUP_MS + WINDOW_MS);
@@ -107,23 +120,43 @@ try{
 
   /* ===== 2. 励ましの優先順位とクールダウン ===== */
   section("2. 励ましの優先順位とクールダウン");
-  // 眠気と無表情が同時に成立している。眠気が優先されるはず
-  await page.waitForFunction(() => !document.getElementById("cheer").hidden,
-    null, { timeout:20_000 }).catch(() => {});
-  const tag = await text("#cheerTag");
-  check("眠気と無表情が重なったら覚醒を優先する", tag === "覚醒", `タグ=${tag}`);
+  // カードは一定時間で自動的に消える。表示されている瞬間を狙って調べると取りこぼすので、
+  // 出たものは observer に控えておき（見た目の確認用）、回数と間隔はイベント履歴で見る。
+  const shown = () => page.evaluate(() => window.__cards.slice());
+  const cheers = () => hook(() =>
+    window.__test.allEvents().then(list => list.filter(e => e.type === "cheer")));
+
+  async function untilCheers(count, timeoutMs){
+    const deadline = Date.now() + timeoutMs;
+    for(;;){
+      const list = await cheers();
+      if(list.length >= count) return list;
+      if(Date.now() > deadline) throw new Error(`励ましが ${count} 件に届きませんでした（${list.length} 件）`);
+      await wait(200);
+    }
+  }
+
+  const [firstCheer] = await untilCheers(1, 40_000);
+  check("眠気が続くと覚醒の励ましが出る", firstCheer.kind === "wake", firstCheer.kind);
+  const firstCard = (await shown())[0];
   check("覚醒カードの見た目が切り替わる",
-    await page.evaluate(() => document.getElementById("cheer").classList.contains("wake")));
+    firstCard?.tag === "覚醒" && firstCard?.wake === true, JSON.stringify(firstCard));
 
-  await hideCard();
   await setScenario(SAD);          // 目は覚めているが無表情
-  await wait(COLUMN_MS * 60);
-  check("クールダウン中は次の励ましを出さない", !(await cardVisible()));
+  // 2 件目が出るまで待ち、1 件目との間隔でクールダウンを見る。
+  // 「一定時間待って出ていないこと」で見ると、待ち始めた時点でクールダウンが
+  // どこまで進んでいるかに結果が左右されてしまう。
+  const pair = await untilCheers(2, 90_000);
+  const gap = pair[1].epochMs - pair[0].epochMs;
+  check("次の励ましまでクールダウンぶん間隔が空く", gap >= COOLDOWN_MS - 500, `${gap}ms（下限 ${COOLDOWN_MS}ms）`);
+  check("クールダウン明けに笑顔の励ましが出る", pair[1].kind === "smile", pair[1].kind);
 
-  await page.waitForFunction(() => !document.getElementById("cheer").hidden,
-    null, { timeout:60_000 }).catch(() => {});
-  check("クールダウン明けに笑顔の励ましが出る", (await text("#cheerTag")) === "笑顔",
-    `タグ=${await text("#cheerTag")}`);
+  // ここで眠気に戻すと、無表情はすでに継続しているので両方が成立した状態になる。
+  // 次にどちらが出るかが、そのまま優先順位の答えになる。
+  // 1 件目では笑顔側がまだ継続時間に達しておらず、同着になっていない。
+  await setScenario(DROWSY);
+  const three = await untilCheers(3, 90_000);
+  check("両方が同時に成立していたら覚醒を優先する", three[2].kind === "wake", three[2].kind);
   await hideCard();
 
   /* ===== 3. 不在と復帰 ===== */
@@ -163,45 +196,61 @@ try{
   check("取り直した基準が画面に反映される",
     !(await text("#fluctBase")).includes("--"), await text("#fluctBase"));
   check("基準の取得がイベントとして残る",
-    (await hook(() => window.__test.events().filter(e => e.type === "baseline" && e.manual))).length === 1);
+    (await hook(() => window.__test.allEvents()
+      .then(list => list.filter(e => e.type === "baseline" && e.manual).length))) === 1);
 
   await setScenario(ALERT);
   await wait(WINDOW_MS);
 
-  /* ===== 5. 未書き出しの検知 ===== */
-  section("5. 未書き出しの検知");
-  check("記録がたまると未書き出しになる", await hook(() => window.__test.isDirty()));
+  /* ===== 5. 保存 ===== */
+  section("5. 保存");
+  check("この環境で記録を保存できる", await hook(() => window.__test.dbAvailable()));
 
-  // クリックと同じ同期ターンの中で見る。await を挟むと rAF が回り、正当に 1 行増えてしまう
-  check("CSV を書き出すと解消する",
-    await hook(() => { document.getElementById("csvBtn").click(); return !window.__test.isDirty(); }));
-  await wait(COLUMN_MS * 2);
-  check("書き出した後に行が増えると再び未書き出しになる", await hook(() => window.__test.isDirty()));
-
-  check("JSON を書き出すと解消する",
-    await hook(() => { document.getElementById("jsonBtn").click(); return !window.__test.isDirty(); }));
-
-  // 行数の変わらないイベントだけでも検知できるか。
-  // 書き出し→行数の記録→イベント追加→判定 をすべて同じ同期ターンで行う。
-  // 間に await を挟むと計測ティックが行を足してしまい、何を検知したのか分からなくなる。
-  const eventOnly = await hook(() => {
-    document.getElementById("jsonBtn").click();        // いったん解消させる
-    const rows = window.__test.rowCount();
-    document.getElementById("calibrateBtn").click();   // 行を増やさずイベントだけ足す
-    return { dirty:window.__test.isDirty(), rowsUnchanged:window.__test.rowCount() === rows, rows };
+  // 待ち行列の読み取りと flush の開始を同じ同期ターンで行う。別々の evaluate にすると
+  // その間の計測ティックで行が増え、何件が書き込まれたのか合わなくなる。
+  // 書き込み中も計測は続くので、終わった時点の待ち行列が 0 とは限らない。
+  const flushed = await hook(async () => {
+    const before = { pending:window.__test.pending(), stored:window.__test.stored().rows };
+    await window.__test.flush();
+    return { before, after:{ pending:window.__test.pending(), stored:window.__test.stored().rows } };
   });
-  check("イベントだけが増えた場合も検知する",
-    eventOnly.dirty && eventOnly.rowsUnchanged, JSON.stringify(eventOnly));
+  check("書き込み待ちの行がまとめて保存される",
+    flushed.before.pending > 0 &&
+    flushed.after.stored === flushed.before.stored + flushed.before.pending &&
+    flushed.after.pending < flushed.before.pending,
+    JSON.stringify(flushed));
 
-  // 上限に達すると古い行が捨てられ、件数が動かなくなる
-  await hook(() => { document.getElementById("jsonBtn").click(); });
-  const capped = await hook(() => window.__test.fillToMaxRows());
-  await hook(() => { document.getElementById("jsonBtn").click(); });
-  await wait(COLUMN_MS * 3);
-  check("記録上限に達した後も、件数が動かないまま検知する",
-    (await hook(() => window.__test.isDirty())) &&
-    (await hook(() => window.__test.rowCount())) === capped,
-    `上限 ${capped} 行`);
+  check("件数の表示に期間が入る", /\d+ 件（\d+\/\d+/.test(await text("#logCount")), await text("#logCount"));
+
+  // 再読み込みしても残るか。データが貯まらないと意味がないので、ここが本題
+  const beforeReload = await hook(() => ({ rows:window.__test.stored().rows, session:window.__test.session() }));
+  await page.reload();
+  await page.waitForFunction(() => window.__test && window.__test.total() > 0, null, { timeout:20_000 });
+  const afterReload = await hook(() => ({ rows:window.__test.stored().rows, session:window.__test.session() }));
+  check("再読み込みしても記録が残る", afterReload.rows === beforeReload.rows,
+    `${beforeReload.rows} → ${afterReload.rows}`);
+  check("セッション番号が再読み込みをまたいで続く", afterReload.session === beforeReload.session,
+    `${beforeReload.session} → ${afterReload.session}`);
+
+  // 保存期間より古い行は起動時に捨てられる
+  const seeded = await hook(days => window.__test.seedOld(days, 5), RETENTION_DAYS + 5);
+  const withOld = await hook(() => window.__test.stored().rows);
+  check("古い行を仕込めた", seeded === 5 && withOld === afterReload.rows + 5, `${withOld}`);
+  await page.reload();
+  await page.waitForFunction(() => window.__test && window.__test.total() > 0, null, { timeout:20_000 });
+  check("保存期間より古い記録は起動時に捨てられる",
+    (await hook(() => window.__test.stored().rows)) === afterReload.rows,
+    `${withOld} → ${await hook(() => window.__test.stored().rows)}`);
+
+  // 計測を再開して以降の検証に使うデータを足す
+  await setScenario(ALERT);
+  await page.selectOption("#duration", "30");
+  await page.click("#toggleBtn");
+  await page.waitForFunction(
+    () => document.getElementById("statusText").textContent === "見守り中",
+    null, { timeout:20_000 }
+  );
+  await wait(WARMUP_MS + WINDOW_MS);
 
   /* ===== 6. CSV / JSON の書き出し ===== */
   section("6. CSV / JSON の書き出し");
@@ -214,9 +263,8 @@ try{
     lines[0]);
   const widths = new Set(lines.map(l => l.split(",").length));
   check("CSV の全行が 11 列", widths.size === 1 && widths.has(11), [...widths].join("/"));
-  const dataRows = lines.slice(1).filter(l => !l.startsWith("0,"));   // 上限埋め用のダミーを除く
   check("CSV の時刻が YYYY-MM-DD HH:MM:SS 形式",
-    /^\d+,\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},/.test(dataRows[0]), dataRows[0]);
+    /^\d+,\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},/.test(lines[1]), lines[1]);
 
   const json = JSON.parse(await download("#jsonBtn"));
   check("JSON に必要なキーが揃っている",
@@ -237,11 +285,34 @@ try{
   check("JSON の覚醒スコアが 0–100 の範囲",
     scored.length > 0 && scored.every(s => s.wake >= 0 && s.wake <= 100));
   check("JSON に映像・画像が含まれない", !JSON.stringify(json).includes("data:image"));
+  check("再読み込み前に記録した行も書き出される",
+    new Set(json.samples.map(s => s.session)).size >= 2,
+    [...new Set(json.samples.map(s => s.session))].join(","));
+
+  // 書き出す範囲。すべて今日のデータだと差が出ないので、2 日前の行を仕込んでから比べる
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  await hook(() => window.__test.seedOld(2, 3));
+  const allJson = JSON.parse(await download("#jsonBtn"));
+  const older = allJson.samples.filter(s => s.epochMs < midnight.getTime());
+  check("「すべて」には前の日の記録も入る", older.length === 3, `${older.length} 件`);
+
+  await page.selectOption("#exportRange", "today");
+  const todayJson = JSON.parse(await download("#jsonBtn"));
+  // 2 回の書き出しの間にも計測は進むので、件数の引き算では比べられない。
+  // 「当日より前の行が 1 件も入っていない」ことを見る。
+  const leaked = todayJson.samples.filter(s => s.epochMs < midnight.getTime());
+  check("「今日」を選ぶと当日ぶんだけになる",
+    todayJson.samples.length > 0 && leaked.length === 0,
+    `${todayJson.samples.length} 件中、当日より前が ${leaked.length} 件`);
+  check("書き出した範囲が JSON に残る", todayJson.range === "今日", todayJson.range);
+  await page.selectOption("#exportRange", "all");
 
   /* ===== 7. 記録の消去とセッション境界 ===== */
   section("7. 記録の消去とセッション境界");
-  check("見守り中に消去しても未書き出しは解消される",
-    await hook(() => { document.getElementById("clearBtn").click(); return !window.__test.isDirty(); }));
+  await page.click("#clearBtn");
+  await page.waitForFunction(() => window.__test.stored().rows === 0, null, { timeout:10_000 });
+  check("消去すると保存済みの記録も消える",
+    (await hook(() => window.__test.stored().rows)) === 0);
   await wait(COLUMN_MS * 10);
   const afterClear = JSON.parse(await download("#jsonBtn"));
   const clearStart = afterClear.events.filter(e => e.type === "start" && e.afterClear);
@@ -280,8 +351,31 @@ try{
     !wakeMessages.some(m => /より効く|引きます|効果があります/.test(m)),
     wakeMessages.filter(m => /より効く|引きます|効果があります/.test(m)).join(" / "));
 
+  /* ===== 10. 同梱アセットの選択 ===== */
+  section("10. 同梱アセットの選択");
+  check("同梱が無ければ CDN を使うと明示する",
+    (await text("#note")).includes("CDN"), await text("#note"));
+
+  // vendor/manifest.json があるように見せかけ、そちらを選ぶか確かめる
+  await page.route("**/vendor/manifest.json", route => route.fulfill({
+    status:200,
+    contentType:"application/json",
+    body:JSON.stringify({ bundle:"vendor/vision_bundle.mjs", wasm:"vendor/wasm", model:"vendor/face_landmarker.task" })
+  }));
+  // 一度読み込んだモデルは使い回すので、選び直させるにはページごと読み込み直す
+  await page.reload();
+  await setScenario(ALERT);
+  await page.click("#toggleBtn");
+  await page.waitForFunction(
+    () => document.getElementById("statusText").textContent === "見守り中",
+    null, { timeout:20_000 }
+  );
+  check("同梱があればそちらを使い、通信しないと明示する",
+    (await text("#note")).includes("外部との通信はありません"), await text("#note"));
+  await page.unroute("**/vendor/manifest.json");
+
   /* ===== 仕上げ ===== */
-  section("10. 実行時エラー");
+  section("11. 実行時エラー");
   check("JavaScript エラーが出ていない", pageErrors.length === 0, pageErrors.join(" / "));
 
 }finally{
