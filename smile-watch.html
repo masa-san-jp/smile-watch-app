@@ -141,6 +141,23 @@
     border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);
   }
 
+  .review{
+    margin-top:26px;border-top:1px solid var(--line);padding-top:22px;
+  }
+  .review-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+  .legend{
+    margin-left:auto;display:flex;align-items:center;gap:14px;
+    font-size:11px;color:var(--ink-soft);
+  }
+  .legend i{
+    display:inline-block;width:9px;height:9px;border-radius:2px;
+    margin-right:5px;vertical-align:-1px;
+  }
+  .legend .sw-wake{background:var(--wake);}
+  .legend .sw-smile{background:var(--warm);}
+  .review .cards{padding:16px 0 0;gap:22px;}
+  canvas.chart{height:118px;}
+
   .record{
     margin-top:26px;border-top:1px solid var(--line);padding-top:22px;
   }
@@ -227,6 +244,31 @@
         <button id="calibrateBtn" class="off small" disabled>いまの状態を基準にする</button>
       </div>
     </div>
+  </section>
+
+  <section class="review">
+    <div class="review-head">
+      <h2>振り返り</h2>
+      <span class="legend"><span><i class="sw-wake"></i>覚醒</span><span><i class="sw-smile"></i>笑顔</span></span>
+      <button id="reviewBtn" class="off small">更新</button>
+    </div>
+    <div class="cards">
+      <article>
+        <p class="score-label">日ごとの平均（直近14日）</p>
+        <div class="ribbon-wrap">
+          <canvas id="dayChart" class="chart"></canvas>
+          <div class="axis" id="dayAxis"></div>
+        </div>
+      </article>
+      <article>
+        <p class="score-label">時間帯別の平均</p>
+        <div class="ribbon-wrap">
+          <canvas id="hourChart" class="chart"></canvas>
+          <div class="axis" id="hourAxis"><span>0時</span><span>6時</span><span>12時</span><span>18時</span><span>23時</span></div>
+        </div>
+      </article>
+    </div>
+    <p class="note tight" id="reviewSummary">まだ振り返るだけの記録がありません。</p>
   </section>
 
   <section class="record">
@@ -334,6 +376,9 @@ const fluctBase = document.getElementById("fluctBase");
 const asymBase = document.getElementById("asymBase");
 const logCount = document.getElementById("logCount");
 const recordNote = document.getElementById("recordNote");
+const reviewBtn = document.getElementById("reviewBtn");
+const reviewSummary = document.getElementById("reviewSummary");
+const dayAxis = document.getElementById("dayAxis");
 const exportRange = document.getElementById("exportRange");
 const csvBtn = document.getElementById("csvBtn");
 const jsonBtn = document.getElementById("jsonBtn");
@@ -344,6 +389,12 @@ const ribbons = {
   wake: { canvas:document.getElementById("wakeRibbon"),  ctx:null, columns:[], color:wakeColor  }
 };
 for(const r of Object.values(ribbons)) r.ctx = r.canvas.getContext("2d");
+
+const charts = {
+  day:  { canvas:document.getElementById("dayChart"),  ctx:null, items:[] },
+  hour: { canvas:document.getElementById("hourChart"), ctx:null, items:[] }
+};
+for(const c of Object.values(charts)) c.ctx = c.canvas.getContext("2d");
 
 /* ---------- 状態 ---------- */
 let landmarker = null;
@@ -368,6 +419,8 @@ let assetSource = null;        // "local" | "cdn"
 
 smileThreshold.addEventListener("input", () => smileThresholdOut.textContent = smileThreshold.value);
 wakeThreshold.addEventListener("input", () => wakeThresholdOut.textContent = wakeThreshold.value);
+for(const el of [smileThreshold, wakeThreshold, durationInput]) el.addEventListener("change", saveSettings);
+reviewBtn.addEventListener("click", refreshReview);
 toggleBtn.addEventListener("click", () => running ? stop() : start());
 calibrateBtn.addEventListener("click", () => calibrate(true));
 csvBtn.addEventListener("click", exportCsv);
@@ -397,10 +450,32 @@ async function init(){
     await refreshStored();
   }
   sessionNo = await metaGet("session", 0);
+  await loadSettings();
   recordNote.textContent = db
     ? `記録はこのブラウザに保存され、${RETENTION_DAYS} 日分を残します。書き出されるのは数値だけで、映像や画像は含まれません。`
     : "このブラウザでは記録を保存できないため、タブを閉じると消えます（プライベートウィンドウなどでは保存できません）。";
   updateRecordUi();
+  await refreshReview();
+}
+
+/* ---------- 設定の保存 ---------- */
+async function loadSettings(){
+  const saved = await metaGet("settings", null);
+  if(saved){
+    if(saved.smile    !== undefined) smileThreshold.value = saved.smile;
+    if(saved.wake     !== undefined) wakeThreshold.value = saved.wake;
+    if(saved.duration !== undefined) durationInput.value = saved.duration;
+  }
+  smileThresholdOut.textContent = smileThreshold.value;
+  wakeThresholdOut.textContent = wakeThreshold.value;
+}
+
+function saveSettings(){
+  metaSet("settings", {
+    smile:Number(smileThreshold.value),
+    wake:Number(wakeThreshold.value),
+    duration:durationInput.value
+  });
 }
 
 /* ---------- 開始 / 停止 ---------- */
@@ -444,7 +519,11 @@ async function start(){
 }
 
 function stop(){
-  if(running) addEvent(performance.now(), "stop", { session:sessionNo });
+  if(running){
+    addEvent(performance.now(), "stop", { session:sessionNo });
+    // 直前まで計測していた分も含めて振り返りを作り直す
+    flush().then(refreshReview);
+  }
   running = false;
   stopStream();
   toggleBtn.textContent = "見守りを始める";
@@ -843,6 +922,172 @@ async function readSince(name, fromMs){
   }catch{ return []; }
 }
 
+/* ---------- 振り返り ----------
+   保存済みの行を集計して、日ごとと時間帯別の平均を出す。
+   30 日ぶんは数十万行になりうるので、getAll で持ち上げずカーソルで足しながら進む。 */
+const REVIEW_DAYS = 14;
+const HOUR_MIN_SEC = 300;   // 平均を出すのに必要な計測秒数（5 分）
+
+function startOfDay(ms){
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function emptyBucket(){ return { wake:0, wakeN:0, smile:0, smileN:0, sec:0 }; }
+
+function addTo(bucket, row){
+  bucket.sec++;
+  if(typeof row.wake === "number"){ bucket.wake += row.wake; bucket.wakeN++; }
+  if(typeof row.smileAvg === "number"){ bucket.smile += row.smileAvg; bucket.smileN++; }
+}
+
+function mean(sum, n){ return n ? sum / n : null; }
+
+async function summarize(){
+  if(!db) return null;
+  const from = startOfDay(Date.now() - (REVIEW_DAYS - 1) * 86_400_000);
+  const byDay = new Map();
+  const byHour = Array.from({ length:24 }, emptyBucket);
+
+  try{
+    await new Promise((resolve, reject) => {
+      const cursor = store("samples", "readonly").index("epochMs")
+        .openCursor(IDBKeyRange.lowerBound(from));
+      cursor.onsuccess = () => {
+        const c = cursor.result;
+        if(!c) return resolve();
+        const row = c.value;
+        if(row.face){
+          const when = new Date(row.epochMs);
+          const key = startOfDay(row.epochMs);
+          if(!byDay.has(key)) byDay.set(key, emptyBucket());
+          addTo(byDay.get(key), row);
+          addTo(byHour[when.getHours()], row);
+        }
+        c.continue();
+      };
+      cursor.onerror = () => reject(cursor.error);
+    });
+  }catch{
+    return null;
+  }
+  return { from, byDay, byHour };
+}
+
+async function refreshReview(){
+  reviewBtn.disabled = true;
+  try{
+    const summary = await summarize();
+    const days = [];
+    for(let i = 0; i < REVIEW_DAYS; i++){
+      const key = startOfDay(Date.now() - (REVIEW_DAYS - 1 - i) * 86_400_000);
+      const b = summary?.byDay.get(key) ?? emptyBucket();
+      days.push({ key, wake:mean(b.wake, b.wakeN), smile:mean(b.smile, b.smileN), sec:b.sec });
+    }
+    const hours = (summary?.byHour ?? Array.from({ length:24 }, emptyBucket)).map((b, hour) => ({
+      hour,
+      wake: b.sec >= HOUR_MIN_SEC ? mean(b.wake, b.wakeN) : null,
+      smile:b.sec >= HOUR_MIN_SEC ? mean(b.smile, b.smileN) : null,
+      sec:  b.sec
+    }));
+
+    charts.day.items = days;
+    charts.hour.items = hours;
+    drawChart("day");
+    drawChart("hour");
+    labelDayAxis(days);
+    reviewSummary.textContent = describeReview(days, hours);
+  }finally{
+    reviewBtn.disabled = false;
+  }
+}
+
+function describeReview(days, hours){
+  const sec = days.reduce((a, d) => a + d.sec, 0);
+  if(!sec) return "まだ振り返るだけの記録がありません。しばらく見守ると、ここに日ごとと時間帯別の傾向が出ます。";
+
+  const wake  = weighted(days, "wake");
+  const smile = weighted(days, "smile");
+  const parts = [`直近 ${REVIEW_DAYS} 日で ${duration(sec)} を計測しました。`];
+
+  if(wake !== null && smile !== null){
+    parts.push(`平均は覚醒 ${Math.round(wake)}、笑顔 ${Math.round(smile)} です。`);
+  }else if(wake !== null){
+    parts.push(`平均は覚醒 ${Math.round(wake)} です。`);
+  }
+
+  // 時間帯を比べるには、比べられるだけの時間帯が要る
+  const scored = hours.filter(h => h.wake !== null);
+  if(scored.length >= 3){
+    const worst = scored.reduce((a, b) => (b.wake < a.wake ? b : a));
+    parts.push(`いちばん下がるのは ${worst.hour} 時台（覚醒 ${Math.round(worst.wake)}）です。`);
+  }
+  return parts.join("");
+}
+
+function weighted(days, key){
+  let sum = 0, n = 0;
+  for(const d of days){
+    if(d[key] === null) continue;
+    sum += d[key] * d.sec;
+    n += d.sec;
+  }
+  return n ? sum / n : null;
+}
+
+function duration(sec){
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  return h ? `${h} 時間 ${m} 分` : `${m} 分`;
+}
+
+function labelDayAxis(days){
+  const label = ms => { const d = new Date(ms); return `${d.getMonth() + 1}/${d.getDate()}`; };
+  const picks = [days[0], days[Math.floor(days.length / 2)], days[days.length - 1]];
+  dayAxis.replaceChildren(...picks.map(d => {
+    const span = document.createElement("span");
+    span.textContent = label(d.key);
+    return span;
+  }));
+}
+
+// 1 区画に覚醒と笑顔を並べて描く。
+// リボンは「色＝スコアの高さ」だが、こちらは 2 系列を見比べる図なので、
+// 高さだけで値を表し、色は凡例と同じ単色にする。
+const CHART_WAKE  = "#3E8E7E";
+const CHART_SMILE = "#F0A93B";
+
+function drawChart(key){
+  const c = charts[key];
+  const rect = c.canvas.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  c.ctx.clearRect(0, 0, w, h);
+  c.ctx.fillStyle = "#E9E6F0";
+  c.ctx.fillRect(0, 0, w, h);
+  if(!c.items.length) return;
+
+  const slot = w / c.items.length;
+  const gap = Math.min(3, slot * 0.18);
+  const barW = Math.max(1.5, (slot - gap) / 2);
+
+  const bar = (x, value, color) => {
+    if(value === null){
+      c.ctx.fillStyle = "#DCD8E4";
+      c.ctx.fillRect(x, h / 2 - 1, Math.max(1, barW - 0.5), 2);
+      return;
+    }
+    const height = Math.max(2, (value / 100) * h);
+    c.ctx.fillStyle = color;
+    c.ctx.fillRect(x, h - height, Math.max(1, barW - 0.5), height);
+  };
+
+  c.items.forEach((item, i) => {
+    const x = i * slot + gap / 2;
+    bar(x, item.wake, CHART_WAKE);
+    bar(x + barW, item.smile, CHART_SMILE);
+  });
+}
+
 /* ---------- 表示 ---------- */
 function totalRows(){ return stored.rows + pendingRows.length; }
 
@@ -996,6 +1241,7 @@ async function clearLog(){
   // 開始イベントのないまま書き出される。境界を入れ直して履歴を保つ。
   if(running) addEvent(performance.now(), "start", { session:sessionNo, afterClear:true });
   updateRecordUi();
+  await refreshReview();
 }
 
 function download(filename, text, mime){
@@ -1043,16 +1289,24 @@ function pushColumn(key, value){
   trimColumns(key);
 }
 
+function fitCanvas(canvas, ctx){
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(rect.width * dpr));
+  canvas.height = Math.max(1, Math.round(rect.height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
 function resizeAll(){
   for(const key of Object.keys(ribbons)){
     const r = ribbons[key];
-    const dpr = window.devicePixelRatio || 1;
-    const rect = r.canvas.getBoundingClientRect();
-    r.canvas.width = Math.max(1, Math.round(rect.width * dpr));
-    r.canvas.height = Math.max(1, Math.round(rect.height * dpr));
-    r.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    fitCanvas(r.canvas, r.ctx);
     trimColumns(key);
     drawRibbon(key);
+  }
+  for(const key of Object.keys(charts)){
+    fitCanvas(charts[key].canvas, charts[key].ctx);
+    drawChart(key);
   }
 }
 

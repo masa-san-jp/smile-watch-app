@@ -64,6 +64,10 @@ async function download(selector){
 
 try{
   await page.goto(`http://localhost:${PORT}/`);
+  // 記録が無い状態の振り返りは、あとで確かめるためにここで控えておく
+  await page.waitForFunction(() => window.__test, null, { timeout:20_000 });
+  const emptyReview = await text("#reviewSummary");
+
   await page.selectOption("#duration", "30");
   await setScenario(ALERT);
   await page.click("#toggleBtn");
@@ -374,8 +378,69 @@ try{
     (await text("#note")).includes("外部との通信はありません"), await text("#note"));
   await page.unroute("**/vendor/manifest.json");
 
+  /* ===== 11. 振り返り ===== */
+  section("11. 振り返り");
+  check("記録が無いうちは振り返りを出さない", emptyReview.includes("まだ振り返るだけの記録がありません"), emptyReview);
+
+  // いま動いている計測と時間帯がぶつからないよう、現在時刻からずらして仕込む
+  const nowHour = new Date().getHours();
+  const longHour  = (nowHour + 5) % 24;
+  const shortHour = (nowHour + 7) % 24;
+  const midHour  = (nowHour + 9) % 24;
+  const highHour = (nowHour + 11) % 24;
+  await hook(([h, n]) => window.__test.seedAt(3, h, n, 30, 12), [longHour, 600]);   // 3日前に10分ぶん
+  await hook(([h, n]) => window.__test.seedAt(2, h, n, 80, 40), [shortHour, 60]);   // 2日前に1分だけ
+  await hook(([h, n]) => window.__test.seedAt(4, h, n, 55, 20), [midHour, 600]);
+  await hook(([h, n]) => window.__test.seedAt(5, h, n, 78, 30), [highHour, 600]);
+  // 6日前は、顔が写っている 5 分と、席を外していた 5 分を混ぜる。
+  // 顔なしの行は計測時間にも平均にも入らないはず。
+  await hook(([h, n]) => window.__test.seedAt(6, h, n, 40, 20, true),  [midHour, 300]);
+  await hook(([h, n]) => window.__test.seedAt(6, h, n, 0,  0,  false), [midHour, 300]);
+  await page.click("#reviewBtn");
+  await page.waitForFunction(() => !document.getElementById("reviewBtn").disabled, null, { timeout:30_000 });
+
+  const review = await hook(() => window.__test.review());
+  check("日ごとのグラフが直近14日ぶんある", review.day.length === 14, `${review.day.length}`);
+  const startOfDay = ms => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
+  const seededDay = review.day.find(d => d.key === startOfDay(Date.now() - 3 * 86_400_000));
+  check("仕込んだ日の平均が日ごとに反映される",
+    seededDay && Math.round(seededDay.wake) === 30 && Math.round(seededDay.smile) === 12,
+    JSON.stringify(seededDay));
+  check("仕込んだ時間帯の平均が時間帯別に反映される",
+    Math.round(review.hour[longHour].wake) === 30 && review.hour[longHour].sec === 600,
+    JSON.stringify(review.hour[longHour]));
+  check("計測が短い時間帯は平均を出さない",
+    review.hour[shortHour].wake === null && review.hour[shortHour].sec === 60,
+    JSON.stringify(review.hour[shortHour]));
+
+  const mixedDay = review.day.find(d => d.key === startOfDay(Date.now() - 6 * 86_400_000));
+  check("顔が写っていない時間は計測時間にも平均にも入れない",
+    mixedDay && mixedDay.sec === 300 && Math.round(mixedDay.wake) === 40,
+    JSON.stringify(mixedDay));
+
+  const summary = await text("#reviewSummary");
+  check("振り返りに計測時間と平均が出る",
+    /直近 14 日で .+ を計測しました。/.test(summary) && /平均は覚醒 \d+、笑顔 \d+ です。/.test(summary),
+    summary);
+  check("いちばん覚醒が下がる時間帯を挙げる",
+    summary.includes(`いちばん下がるのは ${longHour} 時台（覚醒 30）`), summary);
+
+  /* ===== 12. 設定の保存 ===== */
+  section("12. 設定の保存");
+  await page.fill("#wakeThreshold", "62");
+  await page.selectOption("#duration", "120");
+  await page.evaluate(() => document.getElementById("wakeThreshold").dispatchEvent(new Event("change")));
+  await wait(300);
+  await page.reload();
+  await page.waitForFunction(() => window.__test, null, { timeout:20_000 });
+  const restored = await hook(() => window.__test.settings());
+  check("しきい値と判定時間が再読み込み後も残る",
+    restored.wake === "62" && restored.duration === "120", JSON.stringify(restored));
+  check("復元した値が画面のラベルにも出る",
+    (await text("#wakeThresholdOut")) === "62", await text("#wakeThresholdOut"));
+
   /* ===== 仕上げ ===== */
-  section("11. 実行時エラー");
+  section("13. 実行時エラー");
   check("JavaScript エラーが出ていない", pageErrors.length === 0, pageErrors.join(" / "));
 
 }finally{
