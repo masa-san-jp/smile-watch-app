@@ -867,9 +867,11 @@ async function toggleNotify(){
     return;
   }
   // 許可を求められるのは操作をきっかけにしたときだけなので、ここで聞く
-  const permission = Notification.permission === "granted"
-    ? "granted"
-    : await Notification.requestPermission();
+  let permission = Notification.permission;
+  if(permission !== "granted"){
+    try{ permission = await Notification.requestPermission(); }
+    catch{ permission = "denied"; }
+  }
   notifyOn = permission === "granted";
   notifyToggle.checked = notifyOn;
   if(!notifyOn){
