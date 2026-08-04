@@ -39,6 +39,26 @@ const browser = await chromium.launch({
   args:["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]
 });
 const context = await browser.newContext({ permissions:["camera"], acceptDownloads:true });
+
+// 通知は実際には出せないので、呼ばれたことだけ控える差し替えを入れる。
+// document.hidden も、裏に回った状態を作れるようテストから操作できるようにする。
+await context.addInitScript(() => {
+  window.__notifications = [];
+  window.__hidden = false;
+  class FakeNotification {
+    constructor(title, options){
+      window.__notifications.push({ title, body:options?.body, tag:options?.tag });
+    }
+    static permission = "granted";
+    static requestPermission(){ return Promise.resolve("granted"); }
+  }
+  window.Notification = FakeNotification;
+  Object.defineProperty(Document.prototype, "hidden", {
+    configurable:true,
+    get(){ return window.__hidden === true; }
+  });
+});
+
 const page = await context.newPage();
 
 const pageErrors = [];
@@ -263,10 +283,10 @@ try{
   const lines = csv.replace(/^﻿/, "").trimEnd().split("\r\n");
   check("CSV が CRLF 区切り", csv.includes("\r\n"));
   check("CSV の見出しが期待どおり",
-    lines[0] === "セッション,記録時刻,経過秒,顔検出,笑顔スコア,笑顔スコア_1分平均,覚醒スコア,PERCLOS,開瞼ゆらぎ,左右差,平均開瞼度",
+    lines[0] === "セッション,記録時刻,経過秒,この行がおおう秒数,顔検出,笑顔スコア,笑顔スコア_1分平均,覚醒スコア,PERCLOS,開瞼ゆらぎ,左右差,平均開瞼度,サンプリング毎秒",
     lines[0]);
   const widths = new Set(lines.map(l => l.split(",").length));
-  check("CSV の全行が 11 列", widths.size === 1 && widths.has(11), [...widths].join("/"));
+  check("CSV の全行が 13 列", widths.size === 1 && widths.has(13), [...widths].join("/"));
   check("CSV の時刻が YYYY-MM-DD HH:MM:SS 形式",
     /^\d+,\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},/.test(lines[1]), lines[1]);
 
@@ -277,7 +297,7 @@ try{
   check("JSON に設定値と基準が入る",
     json.settings.smileThreshold === 20 && json.settings.wakeThreshold === 45 &&
     json.settings.baseline !== null);
-  check("JSON に列の説明が入る", Object.keys(json.fields).length === 11);
+  check("JSON に列の説明が入る", Object.keys(json.fields).length === 13, `${Object.keys(json.fields).length}`);
   check("JSON にイベント履歴が入る",
     json.events.some(e => e.type === "start") &&
     json.events.some(e => e.type === "baseline") &&
@@ -289,6 +309,15 @@ try{
   check("JSON の覚醒スコアが 0–100 の範囲",
     scored.length > 0 && scored.every(s => s.wake >= 0 && s.wake <= 100));
   check("JSON に映像・画像が含まれない", !JSON.stringify(json).includes("data:image"));
+  check("各行がおおう秒数を持つ",
+    json.samples.every(s => typeof s.spanSec === "number" && s.spanSec >= 1),
+    JSON.stringify(json.samples.slice(0, 2).map(s => s.spanSec)));
+  const measured = json.samples.filter(s => s.hz !== null);
+  check("実効サンプリング毎秒を記録する", measured.length > 0 && measured.every(s => s.hz > 0),
+    `${measured.length} 件`);
+  check("計測できた行に 3 指標が入る",
+    measured.every(s => ["perclos", "fluct", "asym"].every(k => typeof s[k] === "number")),
+    JSON.stringify(measured[0]));
   check("再読み込み前に記録した行も書き出される",
     new Set(json.samples.map(s => s.session)).size >= 2,
     [...new Set(json.samples.map(s => s.session))].join(","));
@@ -430,17 +459,136 @@ try{
   await page.fill("#wakeThreshold", "62");
   await page.selectOption("#duration", "120");
   await page.evaluate(() => document.getElementById("wakeThreshold").dispatchEvent(new Event("change")));
-  await wait(300);
+  // 保存は非同期なので、固定時間待つのではなく、実際に書けたのを見てから読み込み直す
+  await page.waitForFunction(
+    () => window.__test.savedSettings().then(s => s && s.wake === 62 && s.duration === "120"),
+    null, { timeout:15_000 }
+  );
   await page.reload();
-  await page.waitForFunction(() => window.__test, null, { timeout:20_000 });
+  // window.__test はスクリプト評価時点でできあがるが、設定の復元は init() の中で
+  // 非同期に行われる。フックの存在だけを待つと、復元前の値を読んでしまう。
+  await page.waitForFunction(
+    () => window.__test && window.__test.settings().wake === "62",
+    null, { timeout:20_000 }
+  ).catch(() => {});
   const restored = await hook(() => window.__test.settings());
   check("しきい値と判定時間が再読み込み後も残る",
     restored.wake === "62" && restored.duration === "120", JSON.stringify(restored));
   check("復元した値が画面のラベルにも出る",
     (await text("#wakeThresholdOut")) === "62", await text("#wakeThresholdOut"));
 
+  /* ===== 13. 裏で動いているときの扱い ===== */
+  section("13. 裏で動いているときの扱い");
+  // サンプリングが粗いと 0.1〜0.4 秒のまばたきを取りこぼすので、PERCLOS は使えない
+  const fast = { perclos:0.40, fluct:0.015, asym:0.015, open:0.9, hz:5 };
+  const slow = { ...fast, hz:1 };
+  const fastScore = await hook(m => window.__test.wakeScoreFor(m), fast);
+  const slowScore = await hook(m => window.__test.wakeScoreFor(m), slow);
+  check("十分な頻度なら PERCLOS を使う", await hook(m => window.__test.usesPerclos(m), fast));
+  check("頻度が落ちたら PERCLOS を使わない", !(await hook(m => window.__test.usesPerclos(m), slow)));
+  check("PERCLOS が高くても、頻度が落ちていれば減点しない",
+    fastScore < 60 && slowScore > 90, `${fastScore} → ${slowScore}`);
+
+  // 通知は、このタブを見ていないときだけ出す
+  await page.evaluate(() => { window.__notifications = []; window.__hidden = false; });
+  await page.check("#notifyToggle");
+  await wait(200);
+  check("通知を有効にできる", await page.isChecked("#notifyToggle"));
+
+  await hook(() => window.__test.showCheer("wake"));
+  check("画面を見ているときは通知しない",
+    (await page.evaluate(() => window.__notifications.length)) === 0);
+
+  await page.evaluate(() => { window.__hidden = true; });
+  await hook(() => window.__test.showCheer("wake"));
+  const sent = await page.evaluate(() => window.__notifications.slice());
+  check("裏に回っているときは通知する", sent.length === 1, JSON.stringify(sent));
+  check("通知に励ましの文面が入る",
+    sent[0] && sent[0].title.includes("覚醒") && sent[0].body.length > 0, JSON.stringify(sent[0]));
+  check("通知が積み上がらないよう tag を固定する", sent[0]?.tag === "smile-watch", sent[0]?.tag);
+  await page.evaluate(() => { window.__hidden = false; });
+
+  /* ===== 14. 自己申告 ===== */
+  section("14. 自己申告");
+  check("停止中は申告ボタンが押せない", await page.isDisabled("#reportSleepy"));
+  // ボタンを disabled にするだけでは、キーボード経路が素通りしてしまう。
+  // reports() はスコアの付いた申告しか返さないので、ここは生のイベントで見る。
+  await page.evaluate(() => document.activeElement?.blur());   // 入力欄にフォーカスを残さない
+  await page.keyboard.press("1");
+  await wait(300);
+  const strays = await hook(() =>
+    window.__test.allEvents().then(list => list.filter(e => e.type === "report")));
+  check("停止中はキーでも申告できない", strays.length === 0, JSON.stringify(strays));
+
+  await setScenario(ALERT);
+  await page.click("#toggleBtn");
+  await page.waitForFunction(
+    () => document.getElementById("statusText").textContent === "見守り中",
+    null, { timeout:20_000 }
+  );
+  await wait(WARMUP_MS + WINDOW_MS);
+  check("見守り中は申告できる", await page.isEnabled("#reportSleepy"));
+
+  await page.click("#reportNormal");
+  await wait(300);
+  const logged = await hook(() => window.__test.reports());
+  check("申告がそのときのスコアと一緒に残る",
+    logged.length === 1 && logged[0].level === "normal" && logged[0].subjective === 50 &&
+    typeof logged[0].wake === "number",
+    JSON.stringify(logged[0] && { level:logged[0].level, wake:logged[0].wake }));
+  check("あとで重みを詰め直せるよう、生の指標も残す",
+    ["perclos", "fluct", "asym", "hz"].every(k => typeof logged[0][k] === "number") &&
+    logged[0].baseline !== undefined,
+    JSON.stringify(logged[0]));
+  check("押した結果が画面に返る",
+    (await text("#reportHint")).includes("ふつう"), await text("#reportHint"));
+
+  // キーボードからも申告できる
+  await page.keyboard.press("3");
+  await wait(300);
+  check("1 / 2 / 3 キーでも申告できる",
+    (await hook(() => window.__test.reports())).some(r => r.level === "sharp"));
+
+  // 入力欄を操作しているときは邪魔しない
+  await page.focus("#wakeThreshold");
+  await page.keyboard.press("1");
+  await wait(300);
+  check("入力欄の操作中はキーを横取りしない",
+    (await hook(() => window.__test.reports())).filter(r => r.level === "sleepy").length === 0,
+    JSON.stringify((await hook(() => window.__test.reports())).map(r => r.level)));
+
+  // 相関の計算そのもの
+  const corr = await hook(() => ({
+    same: window.__test.correlation([0, 50, 100], [10, 55, 99]),
+    opposite: window.__test.correlation([0, 50, 100], [99, 55, 10]),
+    flat: window.__test.correlation([0, 50, 100], [50, 50, 50])
+  }));
+  check("同じ向きなら正の相関", corr.same > 0.99, `${corr.same}`);
+  check("逆向きなら負の相関", corr.opposite < -0.99, `${corr.opposite}`);
+  check("片方が一定なら相関を出さない", corr.flat === null, `${corr.flat}`);
+
+  // 申告が少ないうちは、対応の強さを言わない
+  const few = Array.from({ length:3 }, (_, i) => ({ level:"normal", subjective:50, wake:50 + i }));
+  check("申告が少ないうちは対応の強さを言わない",
+    (await hook(r => window.__test.describeAgreement(r), few)).includes("あと"),
+    await hook(r => window.__test.describeAgreement(r), few));
+
+  const agreeing = [
+    ...Array.from({ length:4 }, () => ({ level:"sleepy", subjective:0,   wake:25 })),
+    ...Array.from({ length:4 }, () => ({ level:"normal", subjective:50,  wake:60 })),
+    ...Array.from({ length:4 }, () => ({ level:"sharp",  subjective:100, wake:88 }))
+  ];
+  const agreeText = await hook(r => window.__test.describeAgreement(r), agreeing);
+  check("申告と揃っていれば、そう伝える",
+    agreeText.includes("同じ向きに動いています") && agreeText.includes("1.00"), agreeText);
+
+  const disagreeing = agreeing.map(r => ({ ...r, wake: 100 - r.wake }));
+  const disagreeText = await hook(r => window.__test.describeAgreement(r), disagreeing);
+  check("申告と食い違っていれば、見直しを促す",
+    disagreeText.includes("一致していません"), disagreeText);
+
   /* ===== 仕上げ ===== */
-  section("13. 実行時エラー");
+  section("15. 実行時エラー");
   check("JavaScript エラーが出ていない", pageErrors.length === 0, pageErrors.join(" / "));
 
 }finally{
