@@ -1386,7 +1386,7 @@ function writeCsv(rows){
       r.session,
       localTime(r.epochMs),
       r.elapsed,
-      cell(r.spanSec),
+      cell(r.spanSec ?? 1),
       r.face ? 1 : 0,
       cell(r.smile), cell(r.smileAvg), cell(r.wake),
       cell(r.perclos), cell(r.fluct), cell(r.asym), cell(r.eyeOpen), cell(r.hz)
