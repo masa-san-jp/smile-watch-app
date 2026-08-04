@@ -682,7 +682,7 @@ function loop(){
     tick(now, span);
     secondBuf = [];
   }
-  loopTimer = setTimeout(loop, SAMPLE_MS);
+  if(running) loopTimer = setTimeout(loop, SAMPLE_MS);
 }
 
 function readFrame(now){
