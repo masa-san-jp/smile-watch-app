@@ -23,3 +23,30 @@ jobs:
       - run: npx playwright install --with-deps chromium
 
       - run: npm test
+
+  # README は Chrome / Edge / Safari を挙げているが、確かめているのは Chromium だけだった。
+  # WebKit（Safari 相当）と Firefox でも流して、その主張が本当かを見る。
+  # まだ様子見なので、ここが落ちてもマージは止めない。
+  other-browsers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [webkit, firefox]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      - run: node tests/run.mjs
+        env:
+          BROWSER: ${{ matrix.browser }}

@@ -6,7 +6,7 @@
 // 取り直し・記録の蓄積と書き出しを通しで確認する。詳しくは tests/README.md を参照。
 
 import fs from "fs";
-import { chromium } from "playwright";
+import * as playwright from "playwright";
 import { serve, WARMUP_MS, WINDOW_MS, COLUMN_MS, RETENTION_DAYS, COOLDOWN_MS } from "./harness.mjs";
 
 const PORT = 8123;
@@ -34,11 +34,30 @@ function check(label, condition, detail){
 function section(title){ console.log(`\n${title}`); }
 
 /* ---------- 本体 ---------- */
+// BROWSER=webkit / firefox で他のエンジンでも流せる。既定は chromium
+const engine = process.env.BROWSER ?? "chromium";
+if(!playwright[engine]) throw new Error(`知らないブラウザです: ${engine}`);
+console.log(`\nブラウザ: ${engine}`);
+
 const server = await serve(PORT);
-const browser = await chromium.launch({
-  args:["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]
-});
+const browser = await playwright[engine].launch();
 const context = await browser.newContext({ permissions:["camera"], acceptDownloads:true });
+
+// カメラは、キャンバスから作った映像で代用する。Chromium のフェイクカメラ用フラグに
+// 頼ると、そのエンジンでしか流せなくなる。
+await context.addInitScript(() => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 640;
+  canvas.height = 480;
+  const ctx = canvas.getContext("2d");
+  let tick = 0;
+  setInterval(() => {
+    tick += 7;
+    ctx.fillStyle = `hsl(${tick % 360}, 45%, 55%)`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }, 33);
+  navigator.mediaDevices.getUserMedia = async () => canvas.captureStream(30);
+});
 
 // 通知は実際には出せないので、呼ばれたことだけ控える差し替えを入れる。
 // document.hidden も、裏に回った状態を作れるようテストから操作できるようにする。
