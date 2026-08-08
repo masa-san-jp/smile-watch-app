@@ -9,12 +9,16 @@ npm install
 npm test
 ```
 
+`npm test` は 2 つ流します。`tests/calibrate.test.mjs`（調整ツール、ブラウザ不要）と
+`tests/run.mjs`（アプリ本体、Chromium が要る）です。
+
 Chromium は Playwright が用意します（`npx playwright install chromium`）。
 
 ## 構成
 
 | ファイル | 役割 |
 |---|---|
+| `calibrate.test.mjs` | `tools/calibrate.mjs` の検証。答えの分かっている申告から設定を取り戻せるかを見る |
 | `stub-vision.mjs` | MediaPipe `FaceLandmarker` のスタブ。`window.__scenario` から blendshape を組み立てて返す |
 | `harness.mjs` | `smile-watch.html` をテスト用に書き換えて静的サーバーで配る |
 | `run.mjs` | Chromium で操作しながら検証する本体 |

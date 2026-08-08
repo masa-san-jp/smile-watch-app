@@ -6,9 +6,10 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node tests/run.mjs",
+    "test": "node tests/calibrate.test.mjs && node tests/run.mjs",
     "fetch-assets": "node tools/fetch-assets.mjs",
-    "start": "python3 -m http.server 8000"
+    "start": "python3 -m http.server 8000",
+    "calibrate": "node tools/calibrate.mjs"
   },
   "devDependencies": {
     "@mediapipe/tasks-vision": "0.10.14",
