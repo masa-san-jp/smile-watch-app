@@ -113,7 +113,8 @@ npm run calibrate -- smile-watch-20260810-093000.json
 
 ## 動作環境
 
-Chrome / Edge / Safari のデスクトップ版。
+Chrome / Edge のデスクトップ版で確認しています。Safari と Firefox は、同じエンジン
+（WebKit / Gecko）で自動テストを流し始めたところで、まだ確認できていません。
 
 ## オフラインで動かす
 
@@ -148,6 +149,8 @@ npm run fetch-assets
 ## テストの自動実行
 
 GitHub Actions で、`main` への push と Pull Request のたびに `npm test` を実行します（[.github/workflows/test.yml](.github/workflows/test.yml)）。
+
+Chromium が判定の基準です。WebKit（Safari 相当）と Firefox でも流していますが、結果を見ている段階なのでマージは止めません。
 
 ## 設計
 

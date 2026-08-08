@@ -12,6 +12,16 @@ npm test
 `npm test` は 2 つ流します。`tests/calibrate.test.mjs`（調整ツール、ブラウザ不要）と
 `tests/run.mjs`（アプリ本体、Chromium が要る）です。
 
+アプリ本体のテストは他のエンジンでも流せます。
+
+```bash
+BROWSER=webkit  node tests/run.mjs    # Safari 相当
+BROWSER=firefox node tests/run.mjs
+```
+
+カメラはキャンバスから作った映像で代用しています。Chromium のフェイクカメラ用フラグに
+頼っていた頃は、そのエンジンでしか流せませんでした。
+
 Chromium は Playwright が用意します（`npx playwright install chromium`）。
 
 ## 構成
@@ -105,4 +115,5 @@ Chromium は Playwright が用意します（`npx playwright install chromium`�
 - 実際にタブを裏に回したときのブラウザの間引き方。13 節は「サンプリングが粗いと判断したときに
   どうふるまうか」を確かめているだけで、間引きそのものは再現していません。通知も、呼び出しを
   記録する差し替えを入れて確認しているだけで、実際に OS の通知は出していません。
-- Safari / Firefox での動作。
+- Safari そのもの。WebKit は Safari と同じエンジンですが、同一ではありません。
+  また WebKit / Firefox は CI で流しているだけで、まだマージの条件にしていません。
